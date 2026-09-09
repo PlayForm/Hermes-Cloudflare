@@ -1,6 +1,6 @@
 name: cloudflare
 version: 0.0.1
-description: "Cloudflare Workers AI model-provider plugin - direct OpenAI-compatible inference with live account-aware catalog discovery."
+description: "Cloudflare AI model-provider plugin - direct OpenAI-compatible inference with live account-aware catalog discovery. DeepSeek V4 Flash is the development default; GLM-5.3 Flash is experimental."
 kind: model-provider
 min_hermes_version: "0.16.0"
 author: PlayForm
