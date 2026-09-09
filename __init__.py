@@ -70,9 +70,22 @@ FALLBACK_MODELS: tuple[str, ...] = (
 
 # Non-chat modalities + safety classifiers filtered from the primary picker.
 _NON_CHAT_FRAGMENTS = (
-    "embed", "image", "audio", "video", "speech", "tts", "rerank", "guard",
-    "classifier", "segment", "whisper", "translation", "m2m", "imagen",
-    "flux", "stable-diffusion",
+    "embed",
+    "image",
+    "audio",
+    "video",
+    "speech",
+    "tts",
+    "rerank",
+    "guard",
+    "classifier",
+    "segment",
+    "whisper",
+    "translation",
+    "m2m",
+    "imagen",
+    "flux",
+    "stable-diffusion",
 )
 
 
@@ -135,7 +148,11 @@ class CloudflareProfile(ProviderProfile):
         self._models_url_override = value
 
     def fetch_models(
-        self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout: float = 8.0,
     ) -> list[str] | None:
         """Live account-aware catalog: ``/ai/models/search`` (OpenRouter format).
 
@@ -158,18 +175,22 @@ class CloudflareProfile(ProviderProfile):
         try:
             from hermes_cli.urllib_security import open_credentialed_url
             from providers.base import _profile_user_agent
+
             req.add_header("User-Agent", _profile_user_agent())
             with open_credentialed_url(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
         except Exception as exc:  # network / auth / malformed payload
             from providers.base import logger
+
             logger.debug("fetch_models(%s): %s", self.name, exc)
             return None
         items = data if isinstance(data, list) else data.get("data", [])
         ids = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
         chat = [
-            mid for mid in ids
-            if isinstance(mid, str) and mid.startswith("@cf/")
+            mid
+            for mid in ids
+            if isinstance(mid, str)
+            and mid.startswith("@cf/")
             and not any(frag in mid for frag in _NON_CHAT_FRAGMENTS)
         ]
         return chat or None
@@ -181,10 +202,11 @@ class CloudflareProfile(ProviderProfile):
 # CloudflareProfile) - the <ACCOUNT_ID> placeholder only appears in contexts
 # that have not loaded the profile .env yet.
 cloudflare = CloudflareProfile(
-    name="auth-cloudflare-workers-ai",
+    name="auth-cloudflare-ai",
     aliases=(
         "cloudflare",
         "cloudflare-ai",
+        "auth-cloudflare-workers-ai",
         "cloudflare-workers-ai",
         "workers-ai",
         "cf-workers-ai",
