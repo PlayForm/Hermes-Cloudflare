@@ -1,4 +1,4 @@
-"""auth-hermes-cloudflare - Cloudflare AI model-provider plugin for Hermes Agent.
+"""auth-hermes-cloudflare - Cloudflare Workers AI model-provider plugin for Hermes Agent.
 
 Registers the ``auth-cloudflare-workers-ai`` provider against Cloudflare's
 OpenAI-compatible Workers AI surface:
@@ -122,7 +122,7 @@ def catalog_url() -> str | None:
 
 
 class CloudflareProfile(ProviderProfile):
-    """Cloudflare AI profile with LAZY, account-aware URLs.
+    """Cloudflare Workers AI profile with LAZY, account-aware URLs.
 
     Plugin discovery runs before the profile .env is loaded into os.environ,
     so eager ``base_url=compute()`` at import time bakes the ``<ACCOUNT_ID>``
@@ -202,20 +202,20 @@ class CloudflareProfile(ProviderProfile):
 # CloudflareProfile) - the <ACCOUNT_ID> placeholder only appears in contexts
 # that have not loaded the profile .env yet.
 cloudflare = CloudflareProfile(
-    name="auth-cloudflare-ai",
+    name="auth-cloudflare-workers-ai",
     aliases=(
+        "auth-cloudflare",
         "cloudflare",
-        "cloudflare-ai",
-        "auth-cloudflare-workers-ai",
         "cloudflare-workers-ai",
         "workers-ai",
         "cf-workers-ai",
         "cf",
+        "cloudflare-ai",
     ),
-    display_name="Cloudflare AI",
+    display_name="Auth Cloudflare Workers AI",
     description=(
-        "Cloudflare AI - direct OpenAI-compatible inference with live, "
-        "account-aware catalog discovery"
+        "Auth Cloudflare Workers AI - direct OpenAI-compatible access to "
+        "Cloudflare-hosted Workers AI models, with account-aware discovery"
     ),
     signup_url="https://dash.cloudflare.com/profile/api-tokens",
     env_vars=(TOKEN_ENV, ACCOUNT_ENV),

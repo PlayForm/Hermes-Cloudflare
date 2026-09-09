@@ -6,7 +6,7 @@
 #
 # NOTE (v0.0.1 scaffold): release-asset checksum verification (SHA256SUMS),
 # temp-extract + atomic install + binary self-validation land in the Phase 4
-# rewrite per .hermes/STEP_ENGINE.md (feedback 04 contract). This version
+# rewrite per .playform/STEP_ENGINE.md (feedback 04 contract). This version
 # keeps the proven dylib flow working against the renamed paths.
 
 set -euo pipefail

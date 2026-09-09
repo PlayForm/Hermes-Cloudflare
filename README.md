@@ -3,9 +3,9 @@
 > **Cloudflare AI model-provider plugin for Hermes Agent - pure Python provider + Rust core.**
 > **Live account-aware catalog discovery, OpenAI-compatible inference, 22-model fallback.**
 
-`auth-hermes-cloudflare` registers the `auth-cloudflare-ai` provider (display
-name **Cloudflare AI**) against Cloudflare's OpenAI-compatible Workers AI
-surface. The account ID is injected from the environment, the catalog is
+`auth-hermes-cloudflare` registers the `auth-cloudflare-workers-ai` provider
+(display name **Auth Cloudflare Workers AI**) against Cloudflare's
+OpenAI-compatible Workers AI surface. The account ID is injected from the environment, the catalog is
 fetched from `/ai/models/search` in the OpenRouter format, and the provider
 shows up in `hermes model` with zero `custom_providers` wiring. **All
 endpoint/auth logic lives in the Rust core; Python is a thin provider.**
@@ -115,9 +115,9 @@ plugin discovery runs before the profile `.env` is loaded.
 
 | Item | Value |
 | :--- | :---- |
-| Provider name | `auth-cloudflare-ai` |
-| Aliases | `cloudflare`, `cloudflare-ai`, `auth-cloudflare-workers-ai`, `cloudflare-workers-ai`, `workers-ai`, `cf-workers-ai`, `cf` |
-| Display name | `Cloudflare AI` |
+| Provider name | `auth-cloudflare-workers-ai` |
+| Aliases | `cloudflare`, `cloudflare-ai`, `auth-cloudflare-ai`, `auth-cloudflare-workers-ai`, `cloudflare-workers-ai`, `workers-ai`, `cf-workers-ai`, `cf` |
+| Display name | `Auth Cloudflare Workers AI` |
 | API mode | `chat_completions` |
 | Auth type | `api_key` |
 | Signup | [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) |
@@ -143,6 +143,33 @@ aliases - the Rust core owns the resolution precedence.
 export CLOUDFLARE_ACCOUNT_ID="<your account id>"
 export CLOUDFLARE_API_TOKEN="<scoped token>"
 ```
+
+---
+
+## Binary (dylib) Flow 📦
+
+The provider path is pure Python, so this is optional. The Rust dylib adds
+the hook/tool integration; `download.sh` fetches it from GitHub Releases:
+
+**`Terminal`**
+
+```sh
+bash download.sh [version] [target-triple]
+```
+
+- Version auto-detection order: `BINARY_VERSION` → `Cargo.toml` (monorepo) →
+  latest GitHub release.
+- Release tag convention: `Cloudflare/v<version>` - the `Build` workflow
+  attaches the four target dylibs (`aarch64`/`x86_64` macOS + Linux) on that
+  tag.
+- Installs into `binaries/` - `libauth_cloudflare_hermes.dylib` (macOS),
+  `.so` (Linux), `.dll` (Windows).
+
+> [!NOTE]
+>
+> No `Cloudflare/v*` release exists yet, so `download.sh` has nothing to
+> fetch until the first tagged build - and nothing needs fetching for the
+> provider to work.
 
 ---
 
