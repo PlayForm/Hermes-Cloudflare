@@ -22,6 +22,7 @@ import json
 import os
 import unittest
 import urllib.error
+from unittest import mock
 
 from helpers import fixture_path, load_plugin
 
@@ -61,6 +62,14 @@ class CatalogTest(unittest.TestCase):
         self._orig_open = self._urllib_security.open_credentialed_url
         self._payload = b"{}"
         self._exc = None
+        # The auth-cloudflare binary is installed on dev machines; these
+        # tests instrument the direct-HTTP fallback, so force the locator
+        # to None (binary-first delegation has its own coverage in
+        # test_binary_discovery.py).
+        self._locator = mock.patch.object(
+            plugin, "locate_auth_cloudflare_binary", return_value=None
+        )
+        self._locator.start()
 
         def fake_open(request, *, timeout=8.0, **kwargs):
             self.captured["url"] = request.full_url
@@ -72,6 +81,7 @@ class CatalogTest(unittest.TestCase):
         self._urllib_security.open_credentialed_url = fake_open
 
     def tearDown(self):
+        self._locator.stop()
         self._urllib_security.open_credentialed_url = self._orig_open
         os.environ.clear()
         os.environ.update(self._saved_env)

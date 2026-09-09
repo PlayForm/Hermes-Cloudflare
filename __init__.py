@@ -494,6 +494,18 @@ def _run_binary_json(
     if rc in (127, 124, 126):
         return None, _binary_failure_msg(" ".join(args), rc), None
     if rc != 0:
+        # The binary prints a full, token-free diagnostic JSON even on
+        # non-zero exit (e.g. doctor with a missing account id exits 2
+        # with configured:false detail). Relay it instead of discarding
+        # it so callers see exactly what is missing; keep rc for
+        # deterministic exit-code propagation.
+        try:
+            data = json.loads(stdout)
+            if isinstance(data, dict):
+                data.setdefault("exit_code", rc)
+                return data, None, rc
+        except json.JSONDecodeError:
+            pass
         return None, _binary_failure_msg(" ".join(args), rc), rc
     try:
         data = json.loads(stdout)
