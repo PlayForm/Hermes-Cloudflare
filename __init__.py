@@ -17,13 +17,24 @@ The base URL is DERIVED from the account ID, so the provider declares
 ``fixed_base_url=True``: the Hermes setup wizard never asks the user for a
 Base URL override (hermes-agent ``_model_flow_api_key_provider`` honors this
 flag and reads the profile's live URL instead).
+
+This provider is registered as ``auth-cloudflare-workers-ai`` with the
+display name **Auth Cloudflare Workers AI**. The Python-side direct catalog
+discovery in ``fetch_models`` is TEMPORARY: when the ``auth-cloudflare``
+executable is present and compatible it takes precedence through the JSON
+CLI protocol, and the direct HTTP fetch must be removed once that bridge is
+stable (``TODO(auth-hermes-cloudflare#1)``).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
+import subprocess
 import urllib.request
+from pathlib import Path
 
 from providers import register_provider
 from providers.base import ProviderProfile
@@ -36,6 +47,31 @@ ACCOUNT_ENV = "CLOUDFLARE_ACCOUNT_ID"
 AUTH_TOKEN_ENV = "AUTH_CLOUDFLARE_API_TOKEN"
 AUTH_ACCOUNT_ENV = "AUTH_CLOUDFLARE_ACCOUNT_ID"
 DEFAULT_MODEL = "@cf/deepseek-ai/deepseek-v4-flash-0731"
+
+# Executable bridge (feedback 04/05/06): the auth-cloudflare CLI owns catalog
+# and policy; the plugin only discovers it, handshakes, and consumes JSON.
+# Discovery NEVER downloads at import - downloading is the installer's job
+# (download.sh) and happens only when Hermes activates the provider.
+BINARY_NAME = "auth-cloudflare"
+_PLUGIN_DIR = Path(__file__).resolve().parent
+
+
+def _read_protocol_version() -> int:
+    """The JSON CLI protocol version from the sibling PROTOCOL_VERSION file.
+
+    Guarded: any read/parse failure falls back to 1 so plugin import never
+    breaks on a missing or malformed file.
+    """
+    try:
+        raw = (_PLUGIN_DIR / "PROTOCOL_VERSION").read_text(encoding="utf-8").strip()
+        if raw:
+            return int(raw)
+    except Exception:
+        pass
+    return 1
+
+
+PROTOCOL_VERSION = _read_protocol_version()
 
 # Account-verified Workers AI chat models - safety/classifier models
 # (llama-guard-3-8b) and non-chat modalities (embedding, image, audio, video)
@@ -121,6 +157,157 @@ def catalog_url() -> str | None:
     return f"{API_BASE}/accounts/{aid}/ai/models/search?format=openrouter&per_page=1000"
 
 
+def runtime_cache_binary_path() -> Path:
+    """Plugin-local runtime cache: where download.sh installs the binary."""
+    return _PLUGIN_DIR / "binaries" / BINARY_NAME
+
+
+def locate_auth_cloudflare_binary() -> str | None:
+    """Locate the auth-cloudflare executable; NEVER downloads at import.
+
+    Order: ``AUTH_CLOUDFLARE_BIN`` env > ``auth-cloudflare`` on PATH >
+    ``~/.hermes/bin/auth-cloudflare`` > plugin ``bin/`` > plugin runtime
+    cache (``binaries/``). Downloading belongs to the installer
+    (``download.sh``) and only happens when Hermes activates the provider
+    or the user runs setup - never during module import.
+    """
+    explicit = os.getenv("AUTH_CLOUDFLARE_BIN", "").strip()
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    on_path = shutil.which(BINARY_NAME)
+    if on_path:
+        return on_path
+    for candidate in (
+        Path.home() / ".hermes" / "bin" / BINARY_NAME,
+        _PLUGIN_DIR / "bin" / BINARY_NAME,
+        runtime_cache_binary_path(),
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _valid_semver(value: object) -> bool:
+    """True when *value* is a semver-shaped ``x.y.z`` string (optional prerelease)."""
+    return isinstance(value, str) and bool(
+        re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.]+)?", value.strip())
+    )
+
+
+def check_binary_compatibility(bin_path: str) -> tuple[bool, str]:
+    """Version handshake: run ``auth-cloudflare version --format json``.
+
+    Validates executable presence, JSON validity, ``name == BINARY_NAME``,
+    ``protocol_version >= PROTOCOL_VERSION`` and a parseable
+    ``package_version``. Returns ``(ok, detail)``; ``detail`` is actionable
+    and token-free - stderr is NEVER echoed verbatim because a misconfigured
+    binary could print secrets to it (only the JSON parse error and the
+    command name are surfaced).
+    """
+    try:
+        proc = subprocess.run(
+            [bin_path, "version", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except FileNotFoundError:
+        return False, f"auth-cloudflare binary not found at {bin_path!r}"
+    except subprocess.TimeoutExpired:
+        return False, "auth-cloudflare version --format json timed out after 5s"
+    except OSError as exc:
+        return False, f"auth-cloudflare binary could not be executed: {exc}"
+    if proc.returncode != 0:
+        return False, (
+            f"auth-cloudflare version exited with code {proc.returncode} - run "
+            "`auth-hermes-cloudflare install --upgrade` or "
+            "`cargo install auth-cloudflare --locked --force`"
+        )
+    try:
+        info = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        return False, (
+            f"auth-cloudflare version returned invalid JSON ({exc}); expected "
+            "`version --format json` output"
+        )
+    if not isinstance(info, dict):
+        return False, "auth-cloudflare version JSON is not an object"
+    name = info.get("name") or info.get("binary")
+    if name != BINARY_NAME:
+        return False, f"unexpected binary name {name!r}; expected {BINARY_NAME!r}"
+    try:
+        protocol = int(info.get("protocol_version", 0))
+    except (TypeError, ValueError):
+        return False, (
+            f"auth-cloudflare protocol_version {info.get('protocol_version')!r} "
+            "is not an integer"
+        )
+    if protocol < PROTOCOL_VERSION:
+        return False, (
+            f"auth-cloudflare protocol {protocol} is older than the required "
+            f"{PROTOCOL_VERSION} - run `auth-hermes-cloudflare install --upgrade`"
+        )
+    package_version = info.get("package_version")
+    if not _valid_semver(package_version):
+        return False, (
+            f"auth-cloudflare package_version {package_version!r} is not valid semver"
+        )
+    return True, f"auth-cloudflare {package_version} (protocol {protocol}) compatible"
+
+
+def _fetch_models_via_binary(bin_path: str, timeout: float = 15.0) -> list[str] | None:
+    """``auth-cloudflare catalog get --format json`` -> eligible model ids.
+
+    The executable is the single source of truth for policy: only
+    ``primary_agent_eligible`` models are returned, ``hidden`` status is
+    excluded, and ordering is recommended first, experimental after (stable
+    within a group). Returns None on any failure so fetch_models falls back
+    to the direct HTTP catalog.
+    """
+    try:
+        proc = subprocess.run(
+            [bin_path, "catalog", "get", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        from providers.base import logger
+
+        logger.debug(
+            "fetch_models(%s): auth-cloudflare catalog get: %s", BINARY_NAME, exc
+        )
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    models = data.get("models") if isinstance(data, dict) else data
+    if not isinstance(models, list):
+        return None
+    status_rank = {"recommended": 0, "experimental": 1}
+    eligible: list[tuple[int, int, str]] = []
+    for index, item in enumerate(models):
+        if not isinstance(item, dict):
+            continue
+        mid = item.get("id")
+        if not isinstance(mid, str) or not mid:
+            continue
+        if not item.get("primary_agent_eligible"):
+            continue
+        if item.get("status") == "hidden":
+            continue
+        status = item.get("status")
+        rank = status_rank.get(status, 2) if isinstance(status, str) else 2
+        eligible.append((rank, index, mid))
+    eligible.sort()
+    return [mid for _, _, mid in eligible] or None
+
+
 class CloudflareProfile(ProviderProfile):
     """Cloudflare Workers AI profile with LAZY, account-aware URLs.
 
@@ -154,14 +341,53 @@ class CloudflareProfile(ProviderProfile):
         base_url: str | None = None,
         timeout: float = 8.0,
     ) -> list[str] | None:
-        """Live account-aware catalog: ``/ai/models/search`` (OpenRouter format).
+        """Live catalog: auth-cloudflare binary first, direct HTTP fallback.
+
+        When the auth-cloudflare executable is present and compatible, the
+        catalog comes from ``catalog get --format json`` (policy-ordered,
+        primary-agent-eligible ids only). The direct in-process fetch of
+        ``/ai/models/search`` stays as the verified default and the fallback
+        on any binary error; it is temporary and must be removed once the
+        executable bridge is stable (TODO below).
+        """
+        bin_path = locate_auth_cloudflare_binary()
+        if bin_path is not None:
+            ok, detail = check_binary_compatibility(bin_path)
+            if ok:
+                models = _fetch_models_via_binary(bin_path, timeout=15.0)
+                if models is not None:
+                    return models
+                from providers.base import logger
+
+                logger.debug(
+                    "fetch_models(%s): binary catalog failed; direct HTTP fallback",
+                    self.name,
+                )
+            else:
+                from providers.base import logger
+
+                logger.debug(
+                    "fetch_models(%s): binary incompatible - %s", self.name, detail
+                )
+        # TODO(auth-hermes-cloudflare#1): remove direct Python catalog fetching
+        # after the auth-cloudflare executable bridge is stable.
+        return self._fetch_models_direct(api_key=api_key, timeout=timeout)
+
+    def _fetch_models_direct(
+        self,
+        *,
+        api_key: str | None = None,
+        timeout: float = 8.0,
+    ) -> list[str] | None:
+        """Direct HTTP ``/ai/models/search`` (OpenRouter format) - TEMPORARY.
 
         The base implementation probes ``{base_url}/models`` which does not
         exist on Cloudflare; this override hits the real search endpoint and
         filters to chat-capable ``@cf/`` models. Returns None on any failure
         so callers fall back to ``fallback_models``. The Rust core owns the
-        canonical catalog logic; this is a thin in-process fallback for
-        wizard/picker paths before the binary contract is wired in.
+        canonical catalog logic; this is a thin in-process fallback that
+        ``TODO(auth-hermes-cloudflare#1)`` removes after the executable
+        bridge is stable.
         """
         url = catalog_url()
         if not url:

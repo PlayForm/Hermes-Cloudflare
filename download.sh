@@ -1,23 +1,51 @@
 #!/usr/bin/env bash
-# auth-hermes-cloudflare - download prebuilt auth-cloudflare binary from GitHub Releases
-# Usage: bash download.sh [version] [target-triple]
-#   version: auto-detected from BINARY_VERSION, then Cargo.toml (monorepo), then GitHub API
-#   target:  auto-detected from uname -sm
+# SPDX-License-Identifier: CC0-1.0
+# Copyright (c) 2026 PlayForm
 #
-# NOTE (v0.0.1 scaffold): release-asset checksum verification (SHA256SUMS),
-# temp-extract + atomic install + binary self-validation land in the Phase 4
-# rewrite per .playform/STEP_ENGINE.md (feedback 04 contract). This version
-# keeps the proven dylib flow working against the renamed paths.
+# auth-hermes-cloudflare - v0.0.1 secure release-asset installer.
+# Installs the auth-cloudflare EXECUTABLE (never a dylib) from GitHub Releases.
+#
+# Security properties:
+#   - downloads ONLY the pinned release asset + SHA256SUMS (never curl | bash)
+#   - verifies the archive sha256 against SHA256SUMS BEFORE extraction
+#   - extracts into a mktemp directory (never directly into BINARY_DIR)
+#   - self-validates the binary: '<exe> version --format json' must report
+#     '"name":"auth-cloudflare"' and '"protocol_version" >= 1'
+#   - atomic install: cp to <bin>/auth-cloudflare.tmp, then mv (rename)
+#   - fail-closed cleanup: an EXIT trap removes the temp dir and temp file
+#   - never reads, writes, or echoes API tokens
+#
+# Usage: bash download.sh [version] [target-triple]
+#   version: auto-detected from BINARY_VERSION (first), then the monorepo
+#            Cargo.toml files, then the GitHub API latest release tag
+#            Cloudflare/v<ver>
+#   target:  auto-detected from uname -sm
+#   env:     BINARY_DIR (default: $SCRIPT_DIR/bin) overrides the install dir;
+#            AUTH_CLOUDFLARE_BIN overrides the final binary path
+#
+# Windows (MINGW/MSYS) is explicitly unsupported in v0.0.1: the release
+# artifact is a .zip and a native download.ps1 installer does not exist yet.
 
 set -euo pipefail
 
-# Resolve relative to this script (never $PWD) so invocations from anywhere
-# write binaries into plugins/auth-hermes-cloudflare/binaries/.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BINARY_DIR="${BINARY_DIR:-$SCRIPT_DIR/binaries}"
 REPO="${REPO:-PlayForm/Cloudflare}"
 BIN_VERSION="${1:-}"
 TARGET="${2:-}"
+
+# --- fail-closed cleanup -------------------------------------------------
+WORK_DIR=""
+TMP_INSTALL=""
+cleanup() {
+	[[ -n "$WORK_DIR" ]] && rm -rf "$WORK_DIR"
+	[[ -n "$TMP_INSTALL" ]] && rm -f "$TMP_INSTALL"
+}
+trap cleanup EXIT
+
+die() {
+	echo "ERROR: $*" >&2
+	exit 1
+}
 
 VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'
 validate_version() {
@@ -36,75 +64,186 @@ validate_version() {
 	return 0
 }
 
+if ! command -v curl &>/dev/null; then
+	die "curl is required to download release assets - install curl, or set AUTH_CLOUDFLARE_BIN to an existing auth-cloudflare binary"
+fi
+
+# --- resolve the version -------------------------------------------------
 if [[ -z "$BIN_VERSION" ]]; then
 	# 1. BINARY_VERSION file - deployed with the plugin, always correct
 	if [[ -f "$SCRIPT_DIR/BINARY_VERSION" ]]; then
-		BIN_VERSION=$(head -1 "$SCRIPT_DIR/BINARY_VERSION" | tr -d '[:space:]')
+		BIN_VERSION="$(head -1 "$SCRIPT_DIR/BINARY_VERSION" | tr -d '[:space:]')"
 	fi
 fi
 if [[ -z "$BIN_VERSION" ]]; then
-	# 2. Cargo.toml - for developers with the full monorepo
+	# 2. Cargo.toml - for developers with the full monorepo checked out
 	for f in "$SCRIPT_DIR/../../crates/auth-cloudflare/Cargo.toml" \
 		"$SCRIPT_DIR/../../crates/auth-hermes-cloudflare/Cargo.toml"; do
 		if [[ -f "$f" ]]; then
-			BIN_VERSION=$(grep '^version' "$f" | head -1 | awk -F'"' '{print $2}')
+			BIN_VERSION="$(grep '^version' "$f" | head -1 | awk -F'"' '{print $2}')"
 			[[ -n "$BIN_VERSION" ]] && break
 		fi
 	done
 fi
 if [[ -z "$BIN_VERSION" ]]; then
-	# 3. GitHub API - query latest release tag (needs network, but reliable)
-	if command -v curl &>/dev/null; then
-		BIN_VERSION=$(curl -fsS --connect-timeout 10 --max-time 30 \
-			"https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null |
-			grep '"tag_name":' | head -1 |
-			sed 's/.*"tag_name": *"Cloudflare\/v\([^"]*\)".*/\1/')
-	fi
+	# 3. GitHub API - query the latest release tag (needs network)
+	LATEST_JSON="$(curl -fsS --connect-timeout 10 --max-time 30 \
+		"https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)"
+	BIN_VERSION="$(printf '%s' "$LATEST_JSON" | grep '"tag_name":' | head -1 |
+		sed 's/.*"tag_name": *"Cloudflare\/v\([^"]*\)".*/\1/' || true)"
 fi
 validate_version "$BIN_VERSION" || {
-	echo "ERROR: no valid version found - pass one explicitly: bash download.sh <version>"
+	echo "  no valid version found - pass one explicitly: bash download.sh <version>" >&2
 	exit 1
 }
 
+# --- detect OS / arch -> target triple -----------------------------------
 if [[ -z "$TARGET" ]]; then
-	OS=$(uname -s)
-	ARCH=$(uname -m)
+	OS="$(uname -s)"
+	ARCH="$(uname -m)"
 	case "$ARCH" in
 	arm64 | aarch64) ARCH="aarch64" ;;
-	x86_64) ARCH="x86_64" ;;
+	x86_64 | amd64) ARCH="x86_64" ;;
+	*)
+		echo "ERROR: unsupported CPU architecture '$ARCH' - pass a target-triple explicitly" >&2
+		exit 1
+		;;
 	esac
 	case "$OS" in
 	Darwin) TARGET="${ARCH}-apple-darwin" ;;
 	Linux) TARGET="${ARCH}-unknown-linux-gnu" ;;
-	MINGW* | MSYS*) TARGET="${ARCH}-pc-windows-msvc" ;;
+	MINGW* | MSYS*)
+		echo "ERROR: unsupported OS '$OS' - Windows installer is not implemented yet (v0.0.1)" >&2
+		exit 1
+		;;
 	*)
-		echo "ERROR: unsupported OS '$OS' - pass target-triple explicitly"
+		echo "ERROR: unsupported OS '$OS' - pass a target-triple explicitly" >&2
 		exit 1
 		;;
 	esac
 fi
 
-ASSET="auth-cloudflare-hermes-${TARGET}.tar.gz"
-URL="https://github.com/${REPO}/releases/download/Cloudflare/v${BIN_VERSION}/${ASSET}"
+# --- Windows is explicitly unsupported in v0.0.1 -------------------------
+if [[ "$TARGET" == *-pc-windows-msvc ]]; then
+	echo "ERROR: the Windows installer is not implemented yet (v0.0.1)." >&2
+	echo "  Windows release artifacts are .zip archives, e.g.:" >&2
+	echo "    https://github.com/${REPO}/releases/download/Cloudflare/v${BIN_VERSION}/auth-cloudflare-${TARGET}.zip" >&2
+	echo "  A native download.ps1 installer is planned for a future release; it does not exist yet." >&2
+	echo "  Until then, install with cargo: cargo install auth-cloudflare --locked" >&2
+	exit 1
+fi
 
+# --- asset naming --------------------------------------------------------
+ASSET="auth-cloudflare-${TARGET}.tar.gz"
+BASE_URL="https://github.com/${REPO}/releases/download/Cloudflare/v${BIN_VERSION}"
+ASSET_URL="${BASE_URL}/${ASSET}"
+SUMS_URL="${BASE_URL}/SHA256SUMS"
+
+# --- download (never curl | bash) ----------------------------------------
 echo "Downloading ${ASSET} (v${BIN_VERSION})"
-mkdir -p "$BINARY_DIR"
-TMP_FILE=$(mktemp)
-trap 'rm -f "$TMP_FILE"' EXIT
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auth-cloudflare-install.XXXXXX")"
+TMP_ARCHIVE="${WORK_DIR}/${ASSET}"
+TMP_SUMS="${WORK_DIR}/SHA256SUMS"
 
-curl -fL --connect-timeout 10 --max-time 300 -o "$TMP_FILE" "$URL" || {
-	echo "ERROR: download failed - ${URL}"
-	echo "  verify the release exists: https://github.com/${REPO}/releases/tag/Cloudflare/v${BIN_VERSION}"
+curl -fL --retry 3 --connect-timeout 10 --max-time 300 -o "$TMP_ARCHIVE" "$ASSET_URL" || {
+	echo "ERROR: download failed - ${ASSET_URL}" >&2
+	echo "  verify the release exists: https://github.com/${REPO}/releases/tag/Cloudflare/v${BIN_VERSION}" >&2
+	exit 1
+}
+curl -fL --retry 3 --connect-timeout 10 --max-time 60 -o "$TMP_SUMS" "$SUMS_URL" || {
+	echo "ERROR: SHA256SUMS download failed - ${SUMS_URL}" >&2
+	echo "  the release exists but is missing its checksum file - do not install unverified artifacts" >&2
 	exit 1
 }
 
-tar -xzf "$TMP_FILE" -C "$BINARY_DIR"
-DYLIB="$BINARY_DIR/libauth_cloudflare_hermes.dylib"
-[[ "$(uname -s)" == "Linux" ]] && DYLIB="$BINARY_DIR/libauth_cloudflare_hermes.so"
-[[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]] && DYLIB="$BINARY_DIR/auth_cloudflare_hermes.dll"
-if [[ ! -f "$DYLIB" ]]; then
-	echo "ERROR: archive did not contain the expected dylib"
+# --- verify sha256 BEFORE extraction (fail closed) ------------------------
+sha256_of() {
+	if command -v sha256sum &>/dev/null; then
+		sha256sum "$1"
+	else
+		shasum -a 256 "$1"
+	fi
+}
+expected="$(awk -v a="$ASSET" '$2 == a { print $1; exit }' "$TMP_SUMS" | tr '[:upper:]' '[:lower:]')"
+if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+	echo "ERROR: SHA256SUMS has no valid checksum entry for ${ASSET}" >&2
+	echo "  refusing to install an unverified archive" >&2
+	echo "  re-check the release: https://github.com/${REPO}/releases/tag/Cloudflare/v${BIN_VERSION}" >&2
 	exit 1
 fi
-printf '%s\n' "$BIN_VERSION" >"$SCRIPT_DIR/BINARY_VERSION"
-echo "OK - installed to $BINARY_DIR"
+actual="$(sha256_of "$TMP_ARCHIVE" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+if [[ "$actual" != "$expected" ]]; then
+	echo "ERROR: sha256 mismatch for ${ASSET} - refusing to install" >&2
+	echo "  expected: ${expected}" >&2
+	echo "  actual:   ${actual}" >&2
+	echo "  the artifact or checksum file may have been tampered with, or the release was re-published" >&2
+	exit 1
+fi
+echo "OK - sha256 verified (${expected:0:16}...)"
+
+# --- extract into the temp dir (never directly into BINARY_DIR) ----------
+EXTRACT_DIR="${WORK_DIR}/extract"
+mkdir -p "$EXTRACT_DIR"
+tar -xzf "$TMP_ARCHIVE" -C "$EXTRACT_DIR" || {
+	echo "ERROR: extraction failed for ${ASSET}" >&2
+	echo "  the archive may be corrupt" >&2
+	exit 1
+}
+
+# --- locate the executable ----------------------------------------------
+EXE=""
+if [[ -f "${EXTRACT_DIR}/bin/auth-cloudflare" ]]; then
+	EXE="${EXTRACT_DIR}/bin/auth-cloudflare"
+elif [[ -f "${EXTRACT_DIR}/auth-cloudflare" ]]; then
+	EXE="${EXTRACT_DIR}/auth-cloudflare"
+fi
+if [[ -z "$EXE" ]]; then
+	echo "ERROR: archive did not contain the auth-cloudflare executable" >&2
+	echo "  searched: bin/auth-cloudflare and auth-cloudflare" >&2
+	echo "  archive contents:" >&2
+	tar -tzf "$TMP_ARCHIVE" | sed 's/^/    /' >&2 || true
+	exit 1
+fi
+
+# --- binary self-validation ----------------------------------------------
+chmod +x "$EXE"
+VER_JSON="$("$EXE" version --format json 2>&1)" || {
+	echo "ERROR: downloaded binary failed self-validation" >&2
+	echo "  command: '$EXE' version --format json" >&2
+	echo "  output:" >&2
+	printf '%s\n' "$VER_JSON" | sed 's/^/    /' >&2
+	echo "  the artifact is not a valid auth-cloudflare executable - do not install" >&2
+	exit 1
+}
+if ! printf '%s' "$VER_JSON" | grep -q '"name":[[:space:]]*"auth-cloudflare"'; then
+	echo "ERROR: binary self-validation failed - reported name is not 'auth-cloudflare'" >&2
+	printf '%s\n' "$VER_JSON" | sed 's/^/  /' >&2
+	exit 1
+fi
+PROTO="$(printf '%s' "$VER_JSON" | grep -o '"protocol_version":[[:space:]]*[0-9][0-9]*' | head -1 | sed 's/.*:[[:space:]]*//' || true)"
+if [[ -z "$PROTO" || "$PROTO" -lt 1 ]]; then
+	echo "ERROR: binary self-validation failed - protocol_version must be >= 1 (got: ${PROTO:-none})" >&2
+	printf '%s\n' "$VER_JSON" | sed 's/^/  /' >&2
+	exit 1
+fi
+PKG_VER="$(printf '%s' "$VER_JSON" | grep -o '"package_version":[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/' || true)"
+echo "OK - binary self-validation passed (name=auth-cloudflare, protocol_version=${PROTO}, package_version=${PKG_VER:-unknown})"
+
+# --- atomic install ------------------------------------------------------
+if [[ -n "${AUTH_CLOUDFLARE_BIN:-}" ]]; then
+	FINAL_PATH="$AUTH_CLOUDFLARE_BIN"
+	BINARY_DIR="$(dirname "$FINAL_PATH")"
+else
+	BINARY_DIR="${BINARY_DIR:-$SCRIPT_DIR/bin}"
+	FINAL_PATH="${BINARY_DIR}/auth-cloudflare"
+fi
+mkdir -p "$BINARY_DIR"
+TMP_INSTALL="${FINAL_PATH}.tmp"
+cp "$EXE" "$TMP_INSTALL"
+chmod +x "$TMP_INSTALL"
+mv -f "$TMP_INSTALL" "$FINAL_PATH"
+TMP_INSTALL=""
+
+echo "OK - installed auth-cloudflare v${BIN_VERSION} to:"
+echo "  ${FINAL_PATH}"
+echo "Verify with: ${FINAL_PATH} version --format json"
