@@ -24,6 +24,32 @@ discovery in ``fetch_models`` is TEMPORARY: when the ``auth-cloudflare``
 executable is present and compatible it takes precedence through the JSON
 CLI protocol, and the direct HTTP fetch must be removed once that bridge is
 stable (``TODO(auth-hermes-cloudflare#1)``).
+
+Hermes-native diagnostics (feedback 01 section 5 / feedback 06, binding):
+``cloudflare_doctor()``, ``cloudflare_catalog_refresh()``,
+``cloudflare_catalog_export()``, ``cloudflare_model_inspect()`` plus the
+``CLI_COMMANDS`` dispatch table and ``cloudflare_command()`` router. Each
+command delegates to the ``auth-cloudflare`` executable (``doctor --format
+json``, ``catalog refresh --format json``, ``catalog export <fmt>``,
+``model inspect <id> --format json``) when the binary is present and
+compatible; without the binary, ``doctor`` and ``model inspect`` return
+token-redacting Python-side results computed from the environment /
+``MODEL_POLICY`` / ``FALLBACK_MODELS``, while ``catalog refresh`` and
+``catalog export`` fail closed (the Rust binary owns live fetching). Every
+subprocess call is timeout-bound, and stderr is never echoed verbatim - only
+the error class and command name are surfaced, so a misconfigured binary can
+never leak a credential through diagnostics output.
+
+When this module is imported inside the Hermes CLI runtime the same four
+commands are wired as ``hermes cloudflare <cmd>`` through the SUPPORTED
+plugin extension point ``PluginContext.register_cli_command``
+(``hermes_cli/plugins.py``), which ``hermes_cli/main.py``
+``_register_plugin_cli_commands`` attaches to the argparse tree. In
+bare-provider contexts (tests, probes, embedded imports) that wiring is
+skipped and the commands stay available through ``cloudflare_command()`` /
+``CLI_COMMANDS``. If the Hermes CLI hook were ever removed, the exact file
+needing a new hook is ``hermes_cli/main.py`` (``_register_plugin_cli_commands``,
+which reads ``PluginManager._cli_commands`` after ``discover_plugins()``).
 """
 
 from __future__ import annotations
@@ -47,6 +73,58 @@ ACCOUNT_ENV = "CLOUDFLARE_ACCOUNT_ID"
 AUTH_TOKEN_ENV = "AUTH_CLOUDFLARE_API_TOKEN"
 AUTH_ACCOUNT_ENV = "AUTH_CLOUDFLARE_ACCOUNT_ID"
 DEFAULT_MODEL = "@cf/deepseek-ai/deepseek-v4-flash-0731"
+
+# Model policy (feedback 06, binding): the plugin's single policy record.
+# Status priority: recommended < available < experimental < hidden. `rank`
+# orders models within a status; `default` marks the sole development
+# default; hidden models (e.g. safety classifiers) are never primary-agent
+# options. The Rust core owns the canonical policy - this dict mirrors it
+# until the `auth-cloudflare policy get --format json` bridge lands.
+MODEL_POLICY: dict[str, dict[str, object]] = {
+    "@cf/deepseek-ai/deepseek-v4-flash-0731": {
+        "status": "recommended",
+        "rank": 10,
+        "default": True,
+        "reason": "Validated development default.",
+    },
+    "@cf/deepseek-ai/deepseek-v4-pro-0813": {
+        "status": "recommended",
+        "rank": 20,
+        "reason": "Premium reasoning.",
+    },
+    "@cf/moonshotai/kimi-k2.7-code": {
+        "status": "recommended",
+        "rank": 30,
+        "reason": "Premium coding.",
+    },
+    "@cf/zai-org/glm-5.3-flash": {
+        "status": "experimental",
+        "rank": 900,
+        "default": False,
+        "reason": "Observed delivery failures; requires passing conformance suite.",
+    },
+    "@cf/meta/llama-guard-3-8b": {
+        "status": "hidden",
+        "primary_agent_eligible": False,
+        "reason": "Safety classifier.",
+    },
+}
+
+# Narrow allow-list for the primary agent picker (feedback 06, binding):
+# only these models lead the picker, in policy rank order. Any other
+# live-discovered chat-like model still appears, but only in an advanced
+# section after every allow-listed model.
+PRIMARY_AGENT_MODELS: tuple[str, ...] = (
+    "@cf/deepseek-ai/deepseek-v4-flash-0731",
+    "@cf/deepseek-ai/deepseek-v4-pro-0813",
+    "@cf/moonshotai/kimi-k2.7-code",
+    "@cf/openai/gpt-oss-120b",
+    "@cf/openai/gpt-oss-20b",
+    "@cf/qwen/qwen3-30b-a3b-fp8",
+    "@cf/qwen/qwen3.8-27b",
+    "@cf/zai-org/glm-5.3",
+    "@cf/zai-org/glm-5.3-flash",
+)
 
 # Executable bridge (feedback 04/05/06): the auth-cloudflare CLI owns catalog
 # and policy; the plugin only discovers it, handshakes, and consumes JSON.
@@ -75,19 +153,24 @@ PROTOCOL_VERSION = _read_protocol_version()
 
 # Account-verified Workers AI chat models - safety/classifier models
 # (llama-guard-3-8b) and non-chat modalities (embedding, image, audio, video)
-# are excluded from the primary picker. Order = recommended coding order.
-# DeepSeek V4 Flash is the development default (feedback 01/02); GLM-5.3 Flash
-# is experimental and stays out of the default position until conformance
-# thresholds are met.
+# are excluded from the primary picker. Policy-recommended models lead in
+# rank order (DeepSeek V4 Flash = default, DeepSeek V4 Pro, Kimi K2.7 Code),
+# then the remaining PRIMARY_AGENT_MODELS allow-list, then the other
+# chat-capable models. GLM-5.3 Flash stays available but experimental and
+# non-default until conformance thresholds are met (feedback 01/02/06).
 FALLBACK_MODELS: tuple[str, ...] = (
+    # Policy-recommended, rank order (10/20/30)
     "@cf/deepseek-ai/deepseek-v4-flash-0731",
-    "@cf/moonshotai/kimi-k2.7-code",
     "@cf/deepseek-ai/deepseek-v4-pro-0813",
+    "@cf/moonshotai/kimi-k2.7-code",
+    # Remaining primary-agent allow-list
     "@cf/openai/gpt-oss-120b",
     "@cf/openai/gpt-oss-20b",
-    "@cf/zai-org/glm-5.3",
-    "@cf/qwen/qwen3.8-27b",
     "@cf/qwen/qwen3-30b-a3b-fp8",
+    "@cf/qwen/qwen3.8-27b",
+    "@cf/zai-org/glm-5.3",
+    "@cf/zai-org/glm-5.3-flash",
+    # Other chat-capable models (advanced picker section)
     "@cf/qwen/qwen2.5-coder-32b-instruct",
     "@cf/meta/llama-4-scout-17b-16e-instruct",
     "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
@@ -123,6 +206,34 @@ _NON_CHAT_FRAGMENTS = (
     "flux",
     "stable-diffusion",
 )
+
+# MODEL_POLICY status priority for ordering: recommended < available <
+# experimental; models without a policy entry sort after every
+# policy-classified model ("the rest").
+_STATUS_PRIORITY = {"recommended": 0, "available": 1, "experimental": 2}
+
+
+def _policy_sort_key(mid: str, index: int) -> tuple[int, int, int]:
+    """Order *mid* by MODEL_POLICY: (status priority, rank, stable index).
+
+    recommended < available < experimental, then models absent from
+    MODEL_POLICY. Hidden/safety models must be excluded by callers before
+    sorting.
+    """
+    entry = MODEL_POLICY.get(mid)
+    if not isinstance(entry, dict):
+        return (3, 1_000_000, index)
+    status = entry.get("status")
+    priority = _STATUS_PRIORITY.get(status, 3) if isinstance(status, str) else 3
+    rank = entry.get("rank")
+    if isinstance(rank, bool) or not isinstance(rank, (int, float, str)):
+        rank = 1_000_000
+    else:
+        try:
+            rank = int(rank)
+        except (TypeError, ValueError):
+            rank = 1_000_000
+    return (priority, rank, index)
 
 
 def _env(*names: str) -> str | None:
@@ -289,8 +400,7 @@ def _fetch_models_via_binary(bin_path: str, timeout: float = 15.0) -> list[str] 
     models = data.get("models") if isinstance(data, dict) else data
     if not isinstance(models, list):
         return None
-    status_rank = {"recommended": 0, "experimental": 1}
-    eligible: list[tuple[int, int, str]] = []
+    eligible: list[tuple[tuple[int, int, int], int, str]] = []
     for index, item in enumerate(models):
         if not isinstance(item, dict):
             continue
@@ -301,11 +411,529 @@ def _fetch_models_via_binary(bin_path: str, timeout: float = 15.0) -> list[str] 
             continue
         if item.get("status") == "hidden":
             continue
-        status = item.get("status")
-        rank = status_rank.get(status, 2) if isinstance(status, str) else 2
-        eligible.append((rank, index, mid))
+        # Keep the binary's primary_agent_eligible gate; reorder by
+        # MODEL_POLICY (recommended first in rank order, hidden/safety out).
+        eligible.append((_policy_sort_key(mid, index), index, mid))
     eligible.sort()
     return [mid for _, _, mid in eligible] or None
+
+
+# ── Hermes-native diagnostics (feedback 01 §5 / feedback 06) ─────────────────
+# Every command delegates to the auth-cloudflare binary when it is present and
+# compatible; Python-side fallbacks are token-redacting and only cover doctor
+# / model inspect (catalog refresh + export fail closed without the binary).
+# Security invariants: every subprocess call has a timeout, stderr is NEVER
+# echoed verbatim (only error class + command name), and no output contains
+# the API token or a full account id.
+
+DOCTOR_TIMEOUT = 20.0
+CATALOG_TIMEOUT = 30.0
+INSPECT_TIMEOUT = 15.0
+_BINARY_MISSING_MSG = "auth-cloudflare binary not found; run download.sh"
+_EXPORT_FORMATS = ("yaml", "markdown")
+
+
+def _redact_account_id(value: str | None) -> str | None:
+    """First 6 + "..." + last 4 of *value*; None stays None.
+
+    The account id is not a secret (the token is), but doctor output and
+    setup diagnostics keep it redacted like the Rust core's
+    ``doctor --format json`` contract. Short values are fully masked to
+    avoid overlapping prefix/suffix gibberish.
+    """
+    if not value:
+        return None
+    value = value.strip()
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:6]}...{value[-4:]}"
+
+
+def _run_binary(bin_path: str, args: list[str], timeout: float) -> tuple[int, str, str]:
+    """Run ``auth-cloudflare <args>``; returns ``(rc, stdout, stderr)``.
+
+    Synthetic rc codes for launch failures (no stderr is captured into the
+    caller's error text): 127 = not found, 124 = timeout, 126 = could not
+    execute. stdout/stderr are otherwise returned verbatim - redaction of
+    *reported* errors happens in the callers, never by trimming here.
+    """
+    try:
+        proc = subprocess.run(
+            [bin_path, *args], capture_output=True, text=True, timeout=timeout
+        )
+    except FileNotFoundError:
+        return 127, "", ""
+    except subprocess.TimeoutExpired:
+        return 124, "", ""
+    except OSError:
+        return 126, "", ""
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def _binary_failure_msg(command: str, rc: int) -> str:
+    """Token-free failure text: error class + command name only."""
+    if rc == 127:
+        return f"auth-cloudflare {command}: binary not found"
+    if rc == 124:
+        return f"auth-cloudflare {command}: timed out"
+    if rc == 126:
+        return f"auth-cloudflare {command}: could not be executed"
+    return f"auth-cloudflare {command}: exited with code {rc}"
+
+
+def _run_binary_json(
+    bin_path: str, args: list[str], timeout: float
+) -> tuple[dict | None, str | None, int | None]:
+    """``auth-cloudflare <args>`` -> ``(parsed_json, error, exit_code)``.
+
+    ``error`` is token-free (class + command name); ``exit_code`` is None on
+    a launch failure (synthetic rc), the process rc otherwise. The parsed
+    payload is only returned as a ``dict`` - anything else is an error.
+    """
+    rc, stdout, _stderr = _run_binary(bin_path, args, timeout)
+    if rc in (127, 124, 126):
+        return None, _binary_failure_msg(" ".join(args), rc), None
+    if rc != 0:
+        return None, _binary_failure_msg(" ".join(args), rc), rc
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        return (
+            None,
+            f"auth-cloudflare {' '.join(args)} returned invalid JSON ({exc})",
+            rc,
+        )
+    if not isinstance(data, dict):
+        return (
+            None,
+            f"auth-cloudflare {' '.join(args)} returned a non-object payload",
+            rc,
+        )
+    return data, None, rc
+
+
+def _locate_usable_binary(binary: str | None) -> tuple[str | None, str | None]:
+    """``(bin_path, incompat_detail)`` for diagnostics use.
+
+    *binary* may be an explicit path; None auto-locates. ``(None, None)``
+    means no binary is installed at all; ``(None, detail)`` means a binary
+    exists but failed the version handshake (detail is actionable and
+    token-free).
+    """
+    bin_path = binary if binary is not None else locate_auth_cloudflare_binary()
+    if bin_path is None:
+        return None, None
+    ok, detail = check_binary_compatibility(bin_path)
+    if not ok:
+        return None, detail
+    return bin_path, None
+
+
+def cloudflare_doctor(binary: str | None = None) -> dict:
+    """Doctor report: auth-cloudflare binary first, Python fallback second.
+
+    With a compatible binary, ``auth-cloudflare doctor --format json`` is
+    run (20s timeout) and its JSON is returned verbatim plus
+    ``"source": "binary"`` - with defensive re-redaction if the binary ever
+    returns the raw account id. Without a binary, a minimal environment
+    report is computed in Python with ``"source": "python-fallback"``: the
+    API token is only ever reported as ``value_redacted: True`` and the
+    account id is redacted ``first6...last4``. No paid inference request is
+    ever made.
+    """
+    bin_path, incompat = _locate_usable_binary(binary)
+    if bin_path is not None:
+        data, error, rc = _run_binary_json(
+            bin_path, ["doctor", "--format", "json"], timeout=DOCTOR_TIMEOUT
+        )
+        if data is None:
+            return {
+                "status": "error",
+                "error": error or _binary_failure_msg("doctor", rc or 1),
+                "source": "binary",
+                "exit_code": rc,
+            }
+        result = dict(data)
+        # Defensive redaction: never trust the binary's redaction blindly.
+        raw_aid = account_id()
+        if raw_aid:
+            aid = result.get("account_id")
+            if isinstance(aid, dict) and aid.get("redacted") == raw_aid:
+                aid["redacted"] = _redact_account_id(raw_aid)
+            endpoint = result.get("endpoint")
+            if isinstance(endpoint, dict):
+                url = endpoint.get("base_url")
+                if isinstance(url, str) and raw_aid in url:
+                    endpoint["base_url"] = url.replace(
+                        raw_aid, _redact_account_id(raw_aid) or "<redacted>"
+                    )
+        result.setdefault("source", "binary")
+        return result
+    if incompat is not None:
+        return {
+            "status": "error",
+            "error": incompat,
+            "source": "binary",
+            "exit_code": 3,
+        }
+
+    aid = account_id()
+    token = api_token()
+    if aid and token:
+        status = "ok"
+    elif aid or token:
+        status = "warning"
+    else:
+        status = "error"
+    return {
+        "status": status,
+        "account_id": {
+            "configured": bool(aid),
+            "redacted": _redact_account_id(aid),
+        },
+        "api_token": {"configured": bool(token), "value_redacted": True},
+        "endpoint": {
+            "base_url": (
+                f"{API_BASE}/accounts/{_redact_account_id(aid)}/ai/v1" if aid else None
+            )
+        },
+        "catalog_cache": {"present": False},
+        "source": "python-fallback",
+        "note": _BINARY_MISSING_MSG,
+    }
+
+
+def cloudflare_catalog_refresh(binary: str | None = None) -> dict:
+    """Live catalog refresh - delegated to the auth-cloudflare binary ONLY.
+
+    ``auth-cloudflare catalog refresh --format json`` (30s timeout) and the
+    JSON is returned as-is. There is intentionally NO Python fallback: the
+    Rust binary owns live fetching, so without it this fails closed with
+    exit_code 3.
+    """
+    bin_path, incompat = _locate_usable_binary(binary)
+    if bin_path is None:
+        return {
+            "status": "error",
+            "error": incompat or _BINARY_MISSING_MSG,
+            "exit_code": 3,
+        }
+    data, error, rc = _run_binary_json(
+        bin_path, ["catalog", "refresh", "--format", "json"], timeout=CATALOG_TIMEOUT
+    )
+    if data is None:
+        return {
+            "status": "error",
+            "error": error or _binary_failure_msg("catalog refresh", rc or 1),
+            "exit_code": rc,
+        }
+    return data
+
+
+def cloudflare_catalog_export(fmt: str, binary: str | None = None) -> dict:
+    """Export the catalog as ``yaml`` or ``markdown`` via the binary.
+
+    ``auth-cloudflare catalog export <fmt>`` (30s timeout); the stdout is
+    returned as ``content``. Fails closed without a compatible binary
+    (exit_code 3) - there is no Python-side exporter.
+    """
+    fmt = (fmt or "").strip().lower()
+    if fmt not in _EXPORT_FORMATS:
+        return {
+            "status": "error",
+            "error": f"unsupported export format {fmt!r}; expected yaml or markdown",
+            "exit_code": 2,
+        }
+    bin_path, incompat = _locate_usable_binary(binary)
+    if bin_path is None:
+        return {
+            "status": "error",
+            "error": incompat or _BINARY_MISSING_MSG,
+            "exit_code": 3,
+        }
+    rc, stdout, _stderr = _run_binary(
+        bin_path, ["catalog", "export", fmt], timeout=CATALOG_TIMEOUT
+    )
+    if rc != 0:
+        return {
+            "status": "error",
+            "error": _binary_failure_msg("catalog export", rc),
+            "exit_code": rc,
+        }
+    return {"status": "ok", "format": fmt, "content": stdout}
+
+
+def _model_policy() -> dict:
+    """MODEL_POLICY if the sibling task defined it, else ``{}``.
+
+    MODEL_POLICY landed in a parallel change; this module works with or
+    without it (``globals()`` resolves at call time, so definition order is
+    irrelevant).
+    """
+    policy = globals().get("MODEL_POLICY")
+    return policy if isinstance(policy, dict) else {}
+
+
+def cloudflare_model_inspect(model_id: str, binary: str | None = None) -> dict:
+    """Inspect one model: binary first, MODEL_POLICY/FALLBACK_MODELS second.
+
+    With a compatible binary, ``auth-cloudflare model inspect <id> --format
+    json`` (15s timeout) is returned as-is. Without the binary, the model is
+    looked up in MODEL_POLICY (if present) and FALLBACK_MODELS and reported
+    as ``{id, in_policy, status, default, primary_agent_eligible, reason}``;
+    an unknown id returns ``{id, found: false}``.
+    """
+    model_id = (model_id or "").strip()
+    if not model_id:
+        return {
+            "status": "error",
+            "error": "model inspect requires a model id",
+            "exit_code": 2,
+        }
+    bin_path, incompat = _locate_usable_binary(binary)
+    if bin_path is not None:
+        data, error, rc = _run_binary_json(
+            bin_path,
+            ["model", "inspect", model_id, "--format", "json"],
+            timeout=INSPECT_TIMEOUT,
+        )
+        if data is None:
+            return {
+                "status": "error",
+                "error": error or _binary_failure_msg("model inspect", rc or 1),
+                "exit_code": rc,
+            }
+        return data
+
+    policy = _model_policy()
+    entry = policy.get(model_id) if isinstance(policy, dict) else None
+    in_fallback = model_id in FALLBACK_MODELS
+    if entry is None and not in_fallback:
+        return {"id": model_id, "found": False}
+
+    is_default = model_id == DEFAULT_MODEL
+    if isinstance(entry, dict):
+        entry_default = entry.get("default")
+        if isinstance(entry_default, bool):
+            is_default = entry_default
+        status = entry.get("status")
+        status = status if isinstance(status, str) and status else None
+        eligible = entry.get("primary_agent_eligible")
+        if not isinstance(eligible, bool):
+            eligible = True
+        reason = entry.get("reason")
+        reason = reason if isinstance(reason, str) and reason else None
+    else:
+        status = None
+        eligible = True
+        reason = None
+
+    return {
+        "id": model_id,
+        "in_policy": True,
+        "status": status
+        or ("recommended" if model_id == FALLBACK_MODELS[0] else "available"),
+        "default": is_default,
+        "primary_agent_eligible": eligible,
+        "reason": reason
+        or (
+            "Validated development default."
+            if is_default
+            else "Model is in the plugin's policy/fallback catalog."
+        ),
+    }
+
+
+CLI_COMMANDS: dict[str, object] = {
+    "doctor": cloudflare_doctor,
+    "catalog refresh": cloudflare_catalog_refresh,
+    "catalog export": cloudflare_catalog_export,
+    "model inspect": cloudflare_model_inspect,
+}
+
+
+def cloudflare_command(cmd: str, **kwargs) -> dict:
+    """Route a diagnostic command string to ``CLI_COMMANDS``.
+
+    Accepted surface (feedback 01 §5): ``doctor``, ``catalog refresh``,
+    ``catalog export <yaml|markdown>``, ``model inspect <model-id>``.
+    Unknown or malformed commands return a usage error dict (exit_code 2) -
+    never raise. Extra keyword arguments (e.g. ``binary=``) pass through to
+    the target command.
+    """
+    parts = (cmd or "").split()
+    if not parts:
+        return {
+            "status": "error",
+            "error": "usage: cloudflare doctor | catalog refresh | "
+            "catalog export <yaml|markdown> | model inspect <model-id>",
+            "exit_code": 2,
+        }
+    head = parts[0].lower()
+    if head == "doctor":
+        return cloudflare_doctor(**kwargs)
+    if head == "catalog":
+        if len(parts) < 2:
+            return {
+                "status": "error",
+                "error": "usage: cloudflare catalog refresh | catalog export <yaml|markdown>",
+                "exit_code": 2,
+            }
+        if parts[1] == "refresh":
+            return cloudflare_catalog_refresh(**kwargs)
+        if parts[1] == "export":
+            if len(parts) < 3:
+                return {
+                    "status": "error",
+                    "error": "cloudflare catalog export requires a format (yaml or markdown)",
+                    "exit_code": 2,
+                }
+            return cloudflare_catalog_export(parts[2], **kwargs)
+        return {
+            "status": "error",
+            "error": f"unknown catalog subcommand {parts[1]!r}",
+            "exit_code": 2,
+        }
+    if head == "model":
+        if len(parts) < 2 or parts[1] != "inspect":
+            return {
+                "status": "error",
+                "error": "usage: cloudflare model inspect <model-id>",
+                "exit_code": 2,
+            }
+        if len(parts) < 3:
+            return {
+                "status": "error",
+                "error": "cloudflare model inspect requires a model id",
+                "exit_code": 2,
+            }
+        return cloudflare_model_inspect(" ".join(parts[2:]), **kwargs)
+    return {
+        "status": "error",
+        "error": f"unknown cloudflare command {head!r}",
+        "exit_code": 2,
+    }
+
+
+# ── hermes cloudflare <cmd> CLI wiring (deliverable 6) ───────────────────────
+# The SUPPORTED extension point is ``PluginContext.register_cli_command``
+# (hermes_cli/plugins.py); hermes_cli/main.py::_register_plugin_cli_commands
+# attaches every ``PluginManager._cli_commands`` entry as a top-level
+# ``hermes <name>`` subparser. Registration is guarded + idempotent so a
+# bare providers import (tests/probes) costs nothing.
+
+
+def _cloudflare_cli_emit(result: dict) -> int:
+    """Print a diagnostics result as JSON; error dicts become exit codes."""
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if result.get("status") == "error":
+        rc = result.get("exit_code")
+        return int(rc) if isinstance(rc, int) else 1
+    return 0
+
+
+def _cloudflare_cli_doctor(args) -> int:  # noqa: ARG001 - argparse namespace
+    return _cloudflare_cli_emit(cloudflare_doctor())
+
+
+def _cloudflare_cli_catalog_refresh(args) -> int:  # noqa: ARG001
+    return _cloudflare_cli_emit(cloudflare_catalog_refresh())
+
+
+def _cloudflare_cli_catalog_export(args) -> int:
+    result = cloudflare_catalog_export(args.format)
+    if result.get("status") == "error":
+        return _cloudflare_cli_emit(result)
+    print(result.get("content", ""), end="")
+    return 0
+
+
+def _cloudflare_cli_model_inspect(args) -> int:
+    return _cloudflare_cli_emit(cloudflare_model_inspect(args.model_id))
+
+
+def _cloudflare_cli_bare(args) -> int:  # noqa: ARG001
+    print("Auth Cloudflare Workers AI diagnostics")
+    print(
+        "usage: hermes cloudflare doctor | catalog refresh | "
+        "catalog export {yaml,markdown} | model inspect <model-id>"
+    )
+    return 0
+
+
+def _build_cloudflare_cli_parser(subparser) -> None:
+    """Build the ``hermes cloudflare`` argparse tree (doctor/catalog/model)."""
+    sub = subparser.add_subparsers(
+        dest="cloudflare_cmd",
+        metavar="{doctor,catalog,model}",
+        help="Auth Cloudflare Workers AI diagnostics",
+    )
+
+    p_doctor = sub.add_parser(
+        "doctor", help="Provider/environment diagnostic report (JSON)"
+    )
+    p_doctor.set_defaults(func=_cloudflare_cli_doctor)
+
+    p_catalog = sub.add_parser(
+        "catalog", help="Catalog operations: refresh (live) or export (yaml|markdown)"
+    )
+    cat = p_catalog.add_subparsers(dest="catalog_cmd", metavar="{refresh,export}")
+    p_refresh = cat.add_parser(
+        "refresh", help="Live-refresh the catalog through the auth-cloudflare binary"
+    )
+    p_refresh.set_defaults(func=_cloudflare_cli_catalog_refresh)
+    p_export = cat.add_parser("export", help="Export the catalog as yaml or markdown")
+    p_export.add_argument(
+        "format", choices=_EXPORT_FORMATS, help="export format (yaml|markdown)"
+    )
+    p_export.set_defaults(func=_cloudflare_cli_catalog_export)
+
+    p_model = sub.add_parser("model", help="Model operations: inspect")
+    m = p_model.add_subparsers(dest="model_cmd", metavar="{inspect}")
+    p_inspect = m.add_parser("inspect", help="Inspect one model (policy/metadata)")
+    p_inspect.add_argument(
+        "model_id", help="model id, e.g. @cf/deepseek-ai/deepseek-v4-flash-0731"
+    )
+    p_inspect.set_defaults(func=_cloudflare_cli_model_inspect)
+
+
+def _try_register_hermes_cli_command() -> None:
+    """Wire ``hermes cloudflare <cmd>`` inside the Hermes CLI runtime.
+
+    No-op (cheaply) in bare-provider contexts where ``hermes_cli`` is not
+    importable or where the command is already registered (the module can be
+    imported twice - once via the providers registry and once via
+    PluginManager discovery). Any failure degrades to a debug log: the
+    programmatic ``cloudflare_command()`` dispatcher remains the API.
+    """
+    try:
+        from hermes_cli.plugins import PluginContext, PluginManifest, get_plugin_manager
+    except Exception:
+        return
+    try:
+        manager = get_plugin_manager()
+        if "cloudflare" in manager._cli_commands:
+            return
+        context = PluginContext(
+            PluginManifest(name="auth-hermes-cloudflare", key="auth-hermes-cloudflare"),
+            manager,
+        )
+        context.register_cli_command(
+            "cloudflare",
+            help="Auth Cloudflare Workers AI diagnostics "
+            "(doctor, catalog refresh/export, model inspect)",
+            description="Provider diagnostics delegated to the auth-cloudflare binary "
+            "when present; token-redacting Python fallbacks otherwise.",
+            setup_fn=_build_cloudflare_cli_parser,
+            handler_fn=_cloudflare_cli_bare,
+        )
+    except Exception as exc:
+        from providers.base import logger
+
+        logger.debug(
+            "auth-hermes-cloudflare: hermes cloudflare CLI registration skipped: %s",
+            exc,
+        )
 
 
 class CloudflareProfile(ProviderProfile):
@@ -382,12 +1010,14 @@ class CloudflareProfile(ProviderProfile):
         """Direct HTTP ``/ai/models/search`` (OpenRouter format) - TEMPORARY.
 
         The base implementation probes ``{base_url}/models`` which does not
-        exist on Cloudflare; this override hits the real search endpoint and
-        filters to chat-capable ``@cf/`` models. Returns None on any failure
-        so callers fall back to ``fallback_models``. The Rust core owns the
-        canonical catalog logic; this is a thin in-process fallback that
-        ``TODO(auth-hermes-cloudflare#1)`` removes after the executable
-        bridge is stable.
+        exist on Cloudflare; this override hits the real search endpoint,
+        filters to chat-capable ``@cf/`` models (hidden/safety excluded),
+        gates the result on PRIMARY_AGENT_MODELS first in policy order, and
+        appends any remaining chat-like models (advanced section). Returns
+        None on any failure so callers fall back to ``fallback_models``.
+        The Rust core owns the canonical catalog logic; this is a thin
+        in-process fallback that ``TODO(auth-hermes-cloudflare#1)`` removes
+        after the executable bridge is stable.
         """
         url = catalog_url()
         if not url:
@@ -418,8 +1048,120 @@ class CloudflareProfile(ProviderProfile):
             if isinstance(mid, str)
             and mid.startswith("@cf/")
             and not any(frag in mid for frag in _NON_CHAT_FRAGMENTS)
+            and MODEL_POLICY.get(mid, {}).get("status") != "hidden"
         ]
-        return chat or None
+        # PRIMARY_AGENT_MODELS gate first: allow-listed models lead in
+        # policy order (recommended < available < experimental), then the
+        # remaining chat-like models (advanced picker section).
+        primary = [mid for mid in chat if mid in PRIMARY_AGENT_MODELS]
+        advanced = [mid for mid in chat if mid not in PRIMARY_AGENT_MODELS]
+        primary.sort(key=lambda mid: _policy_sort_key(mid, chat.index(mid)))
+        ordered = primary + advanced
+        return ordered or None
+
+
+def validate_setup() -> dict:
+    """Six-step setup validation (feedback 01 section 3, binding).
+
+    Order: (1) account_id present + valid 32-hex shape, (2) api_token
+    present (its value is NEVER printed), (3) catalog discovery succeeds,
+    (4) at least one usable chat-agent model, (5) the DeepSeek V4 Flash
+    development default is in the catalog, (6) OPTIONAL explicit test
+    inference - skipped by default. Validation never performs a paid
+    inference request. Returns ``{"overall": "ok"|"warning"|"error",
+    "steps": [...]}``.
+    """
+    steps: list[dict] = []
+
+    # 1. Account ID exists and has a valid shape (Cloudflare: 32 hex chars).
+    aid = account_id()
+    if not aid:
+        steps.append({"step": "account_id", "ok": False, "detail": "missing"})
+    elif not re.fullmatch(r"[0-9a-fA-F]{32}", aid):
+        steps.append(
+            {
+                "step": "account_id",
+                "ok": False,
+                "detail": f"invalid shape ({len(aid)} chars, expected 32 hex)",
+            }
+        )
+    else:
+        # Redacted like `doctor`: prefix...suffix, never the full value.
+        steps.append(
+            {
+                "step": "account_id",
+                "ok": True,
+                "detail": f"configured ({aid[:6]}...{aid[-4:]})",
+            }
+        )
+
+    # 2. API token exists; the value never appears in any detail.
+    token = api_token()
+    steps.append(
+        {
+            "step": "api_token",
+            "ok": bool(token),
+            "detail": "configured" if token else "missing",
+        }
+    )
+
+    # 3. Catalog discovery succeeds (fetch_models swallows most failures;
+    #    the guard keeps this step exception-safe regardless).
+    try:
+        models = cloudflare.fetch_models()
+    except Exception:
+        models = None
+        detail = "error: catalog discovery raised"
+    else:
+        detail = len(models) if models else "error: no models returned"
+    steps.append({"step": "catalog", "ok": bool(models), "detail": detail})
+
+    # 4. At least one usable chat-agent (primary-agent) model.
+    usable = [m for m in (models or []) if m in PRIMARY_AGENT_MODELS]
+    steps.append(
+        {
+            "step": "chat_model",
+            "ok": bool(usable),
+            "detail": (
+                f"{len(usable)} primary-agent model(s)"
+                if usable
+                else "no usable chat-agent model in catalog"
+            ),
+        }
+    )
+
+    # 5. The development default (DeepSeek V4 Flash) is present.
+    has_default = DEFAULT_MODEL in (models or [])
+    steps.append(
+        {
+            "step": "default_model",
+            "ok": has_default,
+            "detail": (
+                f"{DEFAULT_MODEL} present"
+                if has_default
+                else f"{DEFAULT_MODEL} missing from catalog"
+            ),
+        }
+    )
+
+    # 6. Optional explicit test inference - SKIPPED by default: a normal
+    #    setup run must never send a paid inference request (feedback 01).
+    steps.append(
+        {
+            "step": "test_inference",
+            "ok": None,
+            "detail": "optional - not auto-run",
+        }
+    )
+
+    oks = [s["ok"] for s in steps if s["ok"] is not None]
+    if all(oks):
+        overall = "ok"
+    elif any(oks):
+        overall = "warning"
+    else:
+        overall = "error"
+    return {"overall": overall, "steps": steps}
 
 
 # Module-level instance + registration - the exact contract every bundled
@@ -457,3 +1199,7 @@ cloudflare = CloudflareProfile(
 )
 
 register_provider(cloudflare)
+
+# Hermes-native diagnostics CLI wiring (feedback 01 §5): guarded, idempotent,
+# and a no-op outside the Hermes CLI runtime - see _try_register_hermes_cli_command.
+_try_register_hermes_cli_command()
