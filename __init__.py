@@ -1,16 +1,17 @@
-"""cloudflare - Cloudflare AI model-provider plugin for Hermes Agent.
+"""auth-hermes-cloudflare - Cloudflare AI model-provider plugin for Hermes Agent.
 
-Registers the ``cloudflare`` provider against Cloudflare's OpenAI-compatible
-Workers AI surface:
+Registers the ``auth-cloudflare-workers-ai`` provider against Cloudflare's
+OpenAI-compatible Workers AI surface:
 
 - Inference:  ``POST /client/v4/accounts/<ACCOUNT_ID>/ai/v1/chat/completions``
 - Catalog:    ``GET  /client/v4/accounts/<ACCOUNT_ID>/ai/models/search``
               (OpenRouter-compatible format; NOT OpenAI's ``/models``)
 - Verify:     ``GET  /client/v4/user/tokens/verify``
 
-The account ID is injected from the environment (``CLOUDFLARE_ACCOUNT_ID``);
-the API token (``CLOUDFLARE_API_TOKEN``) is a secret and is only ever sent as
-a Bearer header - never logged, never echoed.
+The account ID is injected from the environment (``CLOUDFLARE_ACCOUNT_ID`` /
+``AUTH_CLOUDFLARE_ACCOUNT_ID``); the API token (``CLOUDFLARE_API_TOKEN`` /
+``AUTH_CLOUDFLARE_API_TOKEN``) is a secret and is only ever sent as a Bearer
+header - never logged, never echoed.
 
 The base URL is DERIVED from the account ID, so the provider declares
 ``fixed_base_url=True``: the Hermes setup wizard never asks the user for a
@@ -28,13 +29,20 @@ from providers import register_provider
 from providers.base import ProviderProfile
 
 API_BASE = "https://api.cloudflare.com/client/v4"
+# Legacy Hermes-compatible env names (primary), Auth-Cloudflare canonical
+# names (fallback) - the Rust core owns the resolution precedence.
 TOKEN_ENV = "CLOUDFLARE_API_TOKEN"
 ACCOUNT_ENV = "CLOUDFLARE_ACCOUNT_ID"
+AUTH_TOKEN_ENV = "AUTH_CLOUDFLARE_API_TOKEN"
+AUTH_ACCOUNT_ENV = "AUTH_CLOUDFLARE_ACCOUNT_ID"
 DEFAULT_MODEL = "@cf/deepseek-ai/deepseek-v4-flash-0731"
 
-# Account-verified 27 Workers AI chat models - safety/classifier models
+# Account-verified Workers AI chat models - safety/classifier models
 # (llama-guard-3-8b) and non-chat modalities (embedding, image, audio, video)
 # are excluded from the primary picker. Order = recommended coding order.
+# DeepSeek V4 Flash is the development default (feedback 01/02); GLM-5.3 Flash
+# is experimental and stays out of the default position until conformance
+# thresholds are met.
 FALLBACK_MODELS: tuple[str, ...] = (
     "@cf/deepseek-ai/deepseek-v4-flash-0731",
     "@cf/moonshotai/kimi-k2.7-code",
@@ -60,41 +68,31 @@ FALLBACK_MODELS: tuple[str, ...] = (
     "@cf/qwen/qwq-32b",
 )
 
-# GLM-5.3 Flash: experimental / fallback only - delivery reliability is not
-# yet validated (see .hermes/FEEDBACK.md). Kept out of the default position.
-EXPERIMENTAL_MODELS: tuple[str, ...] = ("@cf/zai-org/glm-5.3-flash",)
-
 # Non-chat modalities + safety classifiers filtered from the primary picker.
 _NON_CHAT_FRAGMENTS = (
-    "embed",
-    "image",
-    "audio",
-    "video",
-    "speech",
-    "tts",
-    "rerank",
-    "guard",
-    "classifier",
-    "segment",
-    "whisper",
-    "translation",
-    "m2m",
-    "imagen",
-    "flux",
-    "stable-diffusion",
+    "embed", "image", "audio", "video", "speech", "tts", "rerank", "guard",
+    "classifier", "segment", "whisper", "translation", "m2m", "imagen",
+    "flux", "stable-diffusion",
 )
 
 
+def _env(*names: str) -> str | None:
+    """First non-empty env var among *names* (canonical then legacy order)."""
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return None
+
+
 def account_id() -> str | None:
-    """The configured account id, or None."""
-    value = os.getenv(ACCOUNT_ENV, "").strip()
-    return value or None
+    """The configured account id (AUTH_CLOUDFLARE_* then CLOUDFLARE_*), or None."""
+    return _env(AUTH_ACCOUNT_ENV, ACCOUNT_ENV)
 
 
 def api_token() -> str | None:
     """The configured API token (never printed), or None."""
-    value = os.getenv(TOKEN_ENV, "").strip()
-    return value or None
+    return _env(AUTH_TOKEN_ENV, TOKEN_ENV)
 
 
 def inference_base_url() -> str:
@@ -137,18 +135,16 @@ class CloudflareProfile(ProviderProfile):
         self._models_url_override = value
 
     def fetch_models(
-        self,
-        *,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        timeout: float = 8.0,
+        self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
         """Live account-aware catalog: ``/ai/models/search`` (OpenRouter format).
 
         The base implementation probes ``{base_url}/models`` which does not
         exist on Cloudflare; this override hits the real search endpoint and
         filters to chat-capable ``@cf/`` models. Returns None on any failure
-        so callers fall back to ``fallback_models``.
+        so callers fall back to ``fallback_models``. The Rust core owns the
+        canonical catalog logic; this is a thin in-process fallback for
+        wizard/picker paths before the binary contract is wired in.
         """
         url = catalog_url()
         if not url:
@@ -162,22 +158,18 @@ class CloudflareProfile(ProviderProfile):
         try:
             from hermes_cli.urllib_security import open_credentialed_url
             from providers.base import _profile_user_agent
-
             req.add_header("User-Agent", _profile_user_agent())
             with open_credentialed_url(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
         except Exception as exc:  # network / auth / malformed payload
             from providers.base import logger
-
             logger.debug("fetch_models(%s): %s", self.name, exc)
             return None
         items = data if isinstance(data, list) else data.get("data", [])
         ids = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
         chat = [
-            mid
-            for mid in ids
-            if isinstance(mid, str)
-            and mid.startswith("@cf/")
+            mid for mid in ids
+            if isinstance(mid, str) and mid.startswith("@cf/")
             and not any(frag in mid for frag in _NON_CHAT_FRAGMENTS)
         ]
         return chat or None
@@ -189,8 +181,9 @@ class CloudflareProfile(ProviderProfile):
 # CloudflareProfile) - the <ACCOUNT_ID> placeholder only appears in contexts
 # that have not loaded the profile .env yet.
 cloudflare = CloudflareProfile(
-    name="cloudflare",
+    name="auth-cloudflare-workers-ai",
     aliases=(
+        "cloudflare",
         "cloudflare-ai",
         "cloudflare-workers-ai",
         "workers-ai",

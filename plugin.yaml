@@ -1,6 +1,6 @@
-name: cloudflare
+name: auth-hermes-cloudflare
 version: 0.0.1
-description: "Cloudflare AI model-provider plugin - direct OpenAI-compatible inference with live account-aware catalog discovery. DeepSeek V4 Flash is the development default; GLM-5.3 Flash is experimental."
+description: "Cloudflare AI model-provider plugin (auth-hermes-cloudflare) - direct OpenAI-compatible inference with live account-aware catalog discovery. DeepSeek V4 Flash is the development default; GLM-5.3 Flash is experimental."
 kind: model-provider
 min_hermes_version: "0.16.0"
 author: PlayForm
@@ -10,3 +10,5 @@ license: CC0-1.0
 env_vars:
   - CLOUDFLARE_API_TOKEN
   - CLOUDFLARE_ACCOUNT_ID
+  - AUTH_CLOUDFLARE_API_TOKEN
+  - AUTH_CLOUDFLARE_ACCOUNT_ID
