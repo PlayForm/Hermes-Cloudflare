@@ -1,0 +1,67 @@
+# Cloudflare proxy binary + plugin dylib (auto-downloaded by download.sh)
+binaries/cloudflare
+binaries/cloudflare.exe
+binaries/libcloudflare_hermes.dylib
+binaries/libcloudflare.dylib
+binaries/libcloudflare_hermes.so
+binaries/cloudflare_hermes.dll
+binaries/cloudflare-hermes-setup
+binaries/.hotreload/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Local config - never commit your API keys
+cloudflare.toml
+cloudflare.local.toml
+
+# Secrets - never commit
+.env
+.env.sh
+*.pem
+*.key
+id_rsa*
+*.bak
+
+# Test artifacts
+.test-results.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+pyrightconfig.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Profiles (if used as Hermes plugin root)
+profiles/
+!profiles/example/
+
+# Hermes runtime artifacts
+.hermes/
+.headroom/
+*.log
+*.lock
+*.tar.gz
+state.db*
+auth.json
+auth.lock
+.hermes_*
+.skills_*
+.update_check
