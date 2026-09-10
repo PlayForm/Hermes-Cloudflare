@@ -22,6 +22,10 @@
 #   target:  auto-detected from uname -sm
 #   env:     BINARY_DIR (default: $SCRIPT_DIR/bin) overrides the install dir;
 #            AUTH_CLOUDFLARE_BIN overrides the final binary path
+#   update:  re-run with a newer version (or 'auth-hermes-cloudflare upgrade',
+#            which invokes this script); install is atomic (copy-then-rename),
+#            so the existing binary is replaced only after the new archive is
+#            checksum-verified and self-validated
 #
 # Windows (MINGW/MSYS) is explicitly unsupported in v0.0.1: the release
 # artifact is a .zip and a native download.ps1 installer does not exist yet.

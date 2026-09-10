@@ -169,7 +169,7 @@ bash download.sh [version] [target-triple]
 ```
 
 - Version auto-detection order: `BINARY_VERSION` → `Cargo.toml` (monorepo) →
-  latest GitHub release.
+  latest `Cloudflare/v*` GitHub release tag.
 - Release tag convention: `Cloudflare/v<version>` - the `Build` workflow
   attaches the per-target archives (`aarch64`/`x86_64` macOS + Linux) on
   that tag.
@@ -184,13 +184,31 @@ bash download.sh [version] [target-triple]
 Discovery order (`locate_auth_cloudflare_binary`): `AUTH_CLOUDFLARE_BIN`
 env → `PATH` → `~/.hermes/bin` → plugin `bin/` → plugin `binaries/`.
 
+The `auth-hermes-cloudflare` binary (`cargo install
+auth-hermes-cloudflare --locked`) manages the engine executable:
+
+```sh
+auth-hermes-cloudflare status                 # JSON: plugin + binary state
+auth-hermes-cloudflare install [options]      # run download.sh, then doctor
+auth-hermes-cloudflare upgrade [options]      # alias of install (re-run download.sh)
+auth-hermes-cloudflare doctor                 # run 'auth-cloudflare doctor --format json'
+auth-hermes-cloudflare uninstall              # remove ~/.hermes/bin/auth-cloudflare (alias: unlink)
+auth-hermes-cloudflare link --source <path>   # symlink/copy <path> → ~/.hermes/bin/auth-cloudflare
+```
+
+`install` options: `--plugin-dir <dir>` (where to find `download.sh`),
+`--binary <path>` (exact install path, sets `AUTH_CLOUDFLARE_BIN`), and
+`--no-download` (print manual install instructions instead). `upgrade`
+re-runs `download.sh` with the latest `BINARY_VERSION`, so updating is the
+same atomic, checksum-verified flow as a fresh install.
+
 > [!NOTE]
 >
 > Without the executable the picker still works pure-Python through the
 > in-process fallback, but the diagnostics and conformance commands are
-> unavailable. No `Cloudflare/v*` release exists yet, so `download.sh` has
-> nothing to fetch until the first tagged build - and nothing needs fetching
-> for the provider to work.
+> unavailable. `download.sh` fetches the checksum-verified `auth-cloudflare`
+> release asset from the `Cloudflare/v<version>` GitHub release built by the
+> `Build` workflow - no Rust toolchain required.
 
 ---
 
