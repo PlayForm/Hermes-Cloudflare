@@ -1,4 +1,4 @@
-# Auth-Hermes-Cloudflare ☁️ Hermes Plugin
+# Auth-Auth-Hermes-Cloudflare ☁️ Hermes Plugin
 
 > **Auth Cloudflare Workers AI model-provider plugin for Hermes Agent - pure Python provider + Rust core executable.**
 > **Live account-aware catalog discovery, OpenAI-compatible inference, 22-model fallback.**
@@ -12,7 +12,7 @@ endpoint/auth logic lives in the Rust core; Python is a thin provider.**
 
 [![plugin](https://img.shields.io/static/v1?label=plugin&message=v0.0.1&color=purple)](plugin.yaml)
 [![hermes](https://img.shields.io/static/v1?label=hermes&message=%E2%89%A50.16.0&color=blue)](https://github.com/NousResearch/hermes-agent)
-[![license](https://img.shields.io/static/v1?label=license&message=CC0-1.0&color=lightgrey)](https://github.com/PlayForm/Cloudflare/blob/Current/LICENSE)
+[![license](https://img.shields.io/static/v1?label=license&message=CC0-1.0&color=lightgrey)](https://github.com/PlayForm/Auth-Cloudflare/blob/Current/LICENSE)
 
 ---
 
@@ -21,8 +21,8 @@ endpoint/auth logic lives in the Rust core; Python is a thin provider.**
 ### One-command
 
 ```bash
-git clone https://github.com/PlayForm/Hermes-Cloudflare.git
-ln -s "$(pwd)/Hermes-Cloudflare" ~/.hermes/plugins/auth-hermes-cloudflare
+git clone https://github.com/PlayForm/Auth-Hermes-Cloudflare.git
+ln -s "$(pwd)/Auth-Hermes-Cloudflare" ~/.hermes/plugins/auth-hermes-cloudflare
 hermes plugins enable auth-hermes-cloudflare
 hermes
 ```
@@ -53,7 +53,7 @@ After installing and launching Hermes once:
 ```
 ~/.hermes/
 ├── plugins/
-│   └── auth-hermes-cloudflare → /path/to/Hermes-Cloudflare    ← symlink to this repo
+│   └── auth-hermes-cloudflare → /path/to/Auth-Hermes-Cloudflare    ← symlink to this repo
 └── profiles/<name>/
     └── plugins/
         └── auth-hermes-cloudflare → ~/.hermes/plugins/auth-hermes-cloudflare
@@ -215,7 +215,7 @@ same atomic, checksum-verified flow as a fresh install.
 ## Dev Install (Rust source)
 
 ```bash
-git clone https://github.com/PlayForm/Cloudflare.git
+git clone https://github.com/PlayForm/Auth-Cloudflare.git
 cd Cloudflare
 git submodule update --init --recursive
 cargo build --release -p auth-cloudflare -p auth-hermes-cloudflare
@@ -227,7 +227,7 @@ cargo build --release -p auth-cloudflare -p auth-hermes-cloudflare
 ## Files
 
 ```
-Hermes-Cloudflare/
+Auth-Hermes-Cloudflare/
 ├── __init__.py          ← 233-line Python provider (register_provider, lazy URLs)
 ├── plugin.yaml          ← model-provider manifest (env vars, min Hermes version)
 ├── download.sh          ← Prebuilt executable installer (checksum-verified, atomic)
