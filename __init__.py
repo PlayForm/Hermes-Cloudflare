@@ -292,7 +292,7 @@ def catalog_url() -> str | None:
 
 
 def runtime_cache_binary_path() -> Path:
-    """Plugin-local runtime cache: where download.sh installs the binary."""
+    """Plugin-local runtime cache fallback (download.sh installs to ~/.hermes/bin)."""
     return _PLUGIN_DIR / "binaries" / BINARY_NAME
 
 
