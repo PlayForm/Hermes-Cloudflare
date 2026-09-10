@@ -20,7 +20,7 @@
 #            Cargo.toml files, then the GitHub API latest release tag
 #            Cloudflare/v<ver>
 #   target:  auto-detected from uname -sm
-#   env:     BINARY_DIR (default: $SCRIPT_DIR/bin) overrides the install dir;
+#   env:     BINARY_DIR (default: $HOME/.hermes/bin) overrides the install dir;
 #            AUTH_CLOUDFLARE_BIN overrides the final binary path
 #   update:  re-run with a newer version (or 'auth-hermes-cloudflare upgrade',
 #            which invokes this script); install is atomic (copy-then-rename),
@@ -238,7 +238,7 @@ if [[ -n "${AUTH_CLOUDFLARE_BIN:-}" ]]; then
 	FINAL_PATH="$AUTH_CLOUDFLARE_BIN"
 	BINARY_DIR="$(dirname "$FINAL_PATH")"
 else
-	BINARY_DIR="${BINARY_DIR:-$SCRIPT_DIR/bin}"
+	BINARY_DIR="${BINARY_DIR:-$HOME/.hermes/bin}"
 	FINAL_PATH="${BINARY_DIR}/auth-cloudflare"
 fi
 mkdir -p "$BINARY_DIR"

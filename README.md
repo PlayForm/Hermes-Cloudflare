@@ -173,7 +173,7 @@ bash download.sh [version] [target-triple]
 - Release tag convention: `Cloudflare/v<version>` - the `Build` workflow
   attaches the per-target archives (`aarch64`/`x86_64` macOS + Linux) on
   that tag.
-- Installs `auth-cloudflare` into the plugin's `bin/` directory by default
+- Installs `auth-cloudflare` into `~/.hermes/bin/auth-cloudflare` by default
   (override with `BINARY_DIR` or `AUTH_CLOUDFLARE_BIN`).
 - SHA256SUMS-verified: the archive checksum must match `SHA256SUMS` before
   extraction, and the extracted binary self-validates via
