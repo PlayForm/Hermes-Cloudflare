@@ -1,6 +1,6 @@
 # Auth-Hermes-Cloudflare ☁️ Hermes Plugin
 
-> **Cloudflare AI model-provider plugin for Hermes Agent - pure Python provider + Rust core.**
+> **Auth Cloudflare Workers AI model-provider plugin for Hermes Agent - pure Python provider + Rust core executable.**
 > **Live account-aware catalog discovery, OpenAI-compatible inference, 22-model fallback.**
 
 `auth-hermes-cloudflare` registers the `auth-cloudflare-workers-ai` provider
@@ -31,14 +31,20 @@ Then export the two env vars the provider reads:
 
 ```bash
 export CLOUDFLARE_ACCOUNT_ID="<your account id>"   # Workers & Pages → Overview
-export CLOUDFLARE_API_TOKEN="<scoped token>"       # Account → Cloudflare AI → Edit
-hermes model                                       # pick: Cloudflare AI
+export CLOUDFLARE_API_TOKEN="<scoped token>"       # Account → Workers AI → Write
+hermes model                                       # pick: Auth Cloudflare Workers AI
 ```
 
+The account ID is operational metadata, not a secret. The API token **is** a
+secret - scope it to **Account → Workers AI → Write** (some dashboard
+versions label the same permission **Workers AI → Edit**) and nothing else.
+Do not request DNS, Workers Scripts, R2, D1, KV, Pages, Zero Trust, or
+account administration permissions.
+
 The provider path is **pure Python** - no Rust toolchain, no binary download,
-no compiled dependencies. The optional `download.sh` flow (prebuilt Rust
-dylib into `binaries/`) is only needed for the hook/tool integration, not for
-using Cloudflare AI in Hermes.
+no compiled dependencies. The optional `download.sh` flow (the prebuilt
+`auth-cloudflare` executable) is only needed for the diagnostics and
+conformance commands, not for using Auth Cloudflare Workers AI in Hermes.
 
 ### What changes after install
 
@@ -75,11 +81,11 @@ No proxy processes are launched - the provider runs in-process.
 
 ```bash
 # In a Hermes session:
-hermes model          # pick: Cloudflare AI
+hermes model          # pick: Auth Cloudflare Workers AI
 
 # Or via CLI - token health check:
 curl https://api.cloudflare.com/client/v4/user/tokens/verify \
-  -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+  -H "Authorization: Bearer $CLOUD...OKEN"
 # → {"success":true,"result":{"id":"...","status":"active",...}}
 ```
 
@@ -96,18 +102,20 @@ rm ~/.hermes/plugins/auth-hermes-cloudflare
 
 ```
 Python (provider registration)              Rust core (single source of truth)
-  __init__.py       233L                     auth-cloudflare (cdylib + rlib)
+  __init__.py       233L                     auth-cloudflare (executable)
     register_provider(cloudflare)             ├─ auth:    account/token → endpoints
     lazy base_url / models_url                ├─ catalog: ModelRecord, ModelRole, CapabilityState
-    fetch_models() (OpenRouter fallback)      └─ cache:   account-scoped cache slug
-                                             auth-hermes-cloudflare (cdylib + rlib)
+    fetch_models() (OpenRouter fallback)      ├─ cache:   account-scoped cache slug
+                                              └─ policy:  model policy + capability table
+                                             auth-hermes-cloudflare (Rust crate)
                                              └─ re-exports core types for hooks/tools
 ```
 
-The Rust core owns the canonical endpoint/auth/catalog logic; the Python
-provider mirrors it in-process so the picker and wizard work with or without
-the dylib. URLs are computed lazily from `os.environ` at access time, because
-plugin discovery runs before the profile `.env` is loaded.
+The Rust core owns the canonical endpoint/auth/catalog/policy logic and ships
+as a single executable, `auth-cloudflare`. The Python provider mirrors it
+in-process so the picker and wizard work with or without the executable. URLs
+are computed lazily from `os.environ` at access time, because plugin
+discovery runs before the profile `.env` is loaded.
 
 ---
 
@@ -116,7 +124,7 @@ plugin discovery runs before the profile `.env` is loaded.
 | Item | Value |
 | :--- | :---- |
 | Provider name | `auth-cloudflare-workers-ai` |
-| Aliases | `cloudflare`, `cloudflare-ai`, `auth-cloudflare-ai`, `auth-cloudflare-workers-ai`, `cloudflare-workers-ai`, `workers-ai`, `cf-workers-ai`, `cf` |
+| Aliases | `auth-cloudflare`, `cloudflare`, `cloudflare-workers-ai`, `workers-ai`, `cf-workers-ai`, `cf` |
 | Display name | `Auth Cloudflare Workers AI` |
 | API mode | `chat_completions` |
 | Auth type | `api_key` |
@@ -141,15 +149,18 @@ aliases - the Rust core owns the resolution precedence.
 
 ```bash
 export CLOUDFLARE_ACCOUNT_ID="<your account id>"
-export CLOUDFLARE_API_TOKEN="<scoped token>"
+export CLOUDFLARE_API_TOKEN="<scoped token>"       # Account → Workers AI → Write
 ```
 
 ---
 
-## Binary (dylib) Flow 📦
+## Executable Flow 📦
 
-The provider path is pure Python, so this is optional. The Rust dylib adds
-the hook/tool integration; `download.sh` fetches it from GitHub Releases:
+The provider path is pure Python, so this is optional. The `auth-cloudflare`
+executable backs the full command surface - `hermes cloudflare doctor /
+catalog refresh / catalog export / model inspect`, catalog caching, and the
+conformance commands (`model verify --suite smoke|tool-loop`, `model
+health`). `download.sh` installs it from GitHub Releases:
 
 **`Terminal`**
 
@@ -160,16 +171,26 @@ bash download.sh [version] [target-triple]
 - Version auto-detection order: `BINARY_VERSION` → `Cargo.toml` (monorepo) →
   latest GitHub release.
 - Release tag convention: `Cloudflare/v<version>` - the `Build` workflow
-  attaches the four target dylibs (`aarch64`/`x86_64` macOS + Linux) on that
-  tag.
-- Installs into `binaries/` - `libauth_cloudflare_hermes.dylib` (macOS),
-  `.so` (Linux), `.dll` (Windows).
+  attaches the per-target archives (`aarch64`/`x86_64` macOS + Linux) on
+  that tag.
+- Installs `auth-cloudflare` into the plugin's `bin/` directory by default
+  (override with `BINARY_DIR` or `AUTH_CLOUDFLARE_BIN`).
+- SHA256SUMS-verified: the archive checksum must match `SHA256SUMS` before
+  extraction, and the extracted binary self-validates via
+  `auth-cloudflare version --format json`.
+- Atomic + fail-closed: installs via copy-then-rename through a temp file,
+  with an `EXIT` trap that removes every temp artifact on any failure.
+
+Discovery order (`locate_auth_cloudflare_binary`): `AUTH_CLOUDFLARE_BIN`
+env → `PATH` → `~/.hermes/bin` → plugin `bin/` → plugin `binaries/`.
 
 > [!NOTE]
 >
-> No `Cloudflare/v*` release exists yet, so `download.sh` has nothing to
-> fetch until the first tagged build - and nothing needs fetching for the
-> provider to work.
+> Without the executable the picker still works pure-Python through the
+> in-process fallback, but the diagnostics and conformance commands are
+> unavailable. No `Cloudflare/v*` release exists yet, so `download.sh` has
+> nothing to fetch until the first tagged build - and nothing needs fetching
+> for the provider to work.
 
 ---
 
@@ -178,8 +199,9 @@ bash download.sh [version] [target-triple]
 ```bash
 git clone https://github.com/PlayForm/Cloudflare.git
 cd Cloudflare
-cargo build -p auth-cloudflare -p auth-hermes-cloudflare
-# Dylibs at target/debug/libauth_cloudflare.dylib and libauth_hermes_cloudflare.dylib
+git submodule update --init --recursive
+cargo build --release -p auth-cloudflare -p auth-hermes-cloudflare
+# auth-cloudflare executable at target/release/auth-cloudflare
 ```
 
 ---
@@ -190,9 +212,9 @@ cargo build -p auth-cloudflare -p auth-hermes-cloudflare
 Hermes-Cloudflare/
 ├── __init__.py          ← 233-line Python provider (register_provider, lazy URLs)
 ├── plugin.yaml          ← model-provider manifest (env vars, min Hermes version)
-├── download.sh          ← Prebuilt binary downloader (optional dylib flow)
-├── BINARY_VERSION       ← Expected binary version
-├── PROTOCOL_VERSION     ← dylib protocol version
+├── download.sh          ← Prebuilt executable installer (checksum-verified, atomic)
+├── BINARY_VERSION       ← Expected executable version
+├── PROTOCOL_VERSION     ← JSON CLI protocol version
 ├── README.md            ← This file
 └── .gitignore
 ```

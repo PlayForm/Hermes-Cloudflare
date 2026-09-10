@@ -19,11 +19,12 @@ Base URL override (hermes-agent ``_model_flow_api_key_provider`` honors this
 flag and reads the profile's live URL instead).
 
 This provider is registered as ``auth-cloudflare-workers-ai`` with the
-display name **Auth Cloudflare Workers AI**. The Python-side direct catalog
-discovery in ``fetch_models`` is TEMPORARY: when the ``auth-cloudflare``
-executable is present and compatible it takes precedence through the JSON
-CLI protocol, and the direct HTTP fetch must be removed once that bridge is
-stable (``TODO(auth-hermes-cloudflare#1)``).
+display name **Auth Cloudflare Workers AI**. Live catalog discovery is owned
+by the ``auth-cloudflare`` executable through the JSON CLI protocol
+(``catalog get --format json``): when the binary is present and compatible it
+is authoritative, and without it ``fetch_models`` returns the static
+``FALLBACK_MODELS`` list - the Rust binary owns live fetching, so the plugin
+never performs direct in-process HTTP catalog discovery.
 
 Hermes-native diagnostics (feedback 01 section 5 / feedback 06, binding):
 ``cloudflare_doctor()``, ``cloudflare_catalog_refresh()``,
@@ -59,7 +60,6 @@ import os
 import re
 import shutil
 import subprocess
-import urllib.request
 from pathlib import Path
 
 from providers import register_provider
@@ -150,6 +150,29 @@ def _read_protocol_version() -> int:
 
 
 PROTOCOL_VERSION = _read_protocol_version()
+
+# The catalog schema the plugin can consume - mirrors the Rust binary's
+# CATALOG_SCHEMA_VERSION (schema.rs). A binary reporting a version JSON
+# without this schema version is rejected by the handshake.
+CATALOG_SCHEMA_VERSION = 1
+
+
+def _read_binary_version() -> str:
+    """The minimum binary package version from the sibling BINARY_VERSION file.
+
+    Guarded: any read/parse failure falls back to "0.0.0" so plugin import
+    never breaks on a missing or malformed file (and no minimum is enforced).
+    """
+    try:
+        raw = (_PLUGIN_DIR / "BINARY_VERSION").read_text(encoding="utf-8").strip()
+        if raw:
+            return raw
+    except Exception:
+        pass
+    return "0.0.0"
+
+
+BINARY_VERSION = _read_binary_version()
 
 # Account-verified Workers AI chat models - safety/classifier models
 # (llama-guard-3-8b) and non-chat modalities (embedding, image, audio, video)
@@ -307,15 +330,32 @@ def _valid_semver(value: object) -> bool:
     )
 
 
+def _semver_tuple(value: str) -> tuple[int, int, int] | None:
+    """Parse a semver ``x.y.z`` string into ``(major, minor, patch)`` ints.
+
+    Prerelease/build suffixes are ignored for ordering; returns None when
+    *value* is not semver-shaped.
+    """
+    if not _valid_semver(value):
+        return None
+    try:
+        major, minor, rest = value.strip().split(".", 2)
+        patch = rest.split("-", 1)[0].split("+", 1)[0]
+        return (int(major), int(minor), int(patch))
+    except (TypeError, ValueError):
+        return None
+
+
 def check_binary_compatibility(bin_path: str) -> tuple[bool, str]:
     """Version handshake: run ``auth-cloudflare version --format json``.
 
     Validates executable presence, JSON validity, ``name == BINARY_NAME``,
-    ``protocol_version >= PROTOCOL_VERSION`` and a parseable
-    ``package_version``. Returns ``(ok, detail)``; ``detail`` is actionable
-    and token-free - stderr is NEVER echoed verbatim because a misconfigured
-    binary could print secrets to it (only the JSON parse error and the
-    command name are surfaced).
+    ``catalog_schema_versions`` containing ``CATALOG_SCHEMA_VERSION``,
+    ``protocol_version >= PROTOCOL_VERSION``, a parseable ``package_version``,
+    and ``package_version >= BINARY_VERSION``. Returns ``(ok, detail)``;
+    ``detail`` is actionable and token-free - stderr is NEVER echoed verbatim
+    because a misconfigured binary could print secrets to it (only the JSON
+    parse error and the command name are surfaced).
     """
     try:
         proc = subprocess.run(
@@ -348,6 +388,16 @@ def check_binary_compatibility(bin_path: str) -> tuple[bool, str]:
     name = info.get("name") or info.get("binary")
     if name != BINARY_NAME:
         return False, f"unexpected binary name {name!r}; expected {BINARY_NAME!r}"
+    schema_versions = info.get("catalog_schema_versions")
+    if (
+        not isinstance(schema_versions, list)
+        or CATALOG_SCHEMA_VERSION not in schema_versions
+    ):
+        return False, (
+            f"auth-cloudflare catalog_schema_versions {schema_versions!r} does not "
+            f"include the supported schema version {CATALOG_SCHEMA_VERSION} - run "
+            "`auth-hermes-cloudflare install --upgrade`"
+        )
     try:
         protocol = int(info.get("protocol_version", 0))
     except (TypeError, ValueError):
@@ -365,6 +415,13 @@ def check_binary_compatibility(bin_path: str) -> tuple[bool, str]:
         return False, (
             f"auth-cloudflare package_version {package_version!r} is not valid semver"
         )
+    actual = _semver_tuple(package_version)
+    required = _semver_tuple(BINARY_VERSION)
+    if actual is not None and required is not None and actual < required:
+        return False, (
+            f"auth-cloudflare package_version {package_version} is older than the "
+            f"required {BINARY_VERSION} - run `auth-hermes-cloudflare install --upgrade`"
+        )
     return True, f"auth-cloudflare {package_version} (protocol {protocol}) compatible"
 
 
@@ -375,7 +432,7 @@ def _fetch_models_via_binary(bin_path: str, timeout: float = 15.0) -> list[str] 
     ``primary_agent_eligible`` models are returned, ``hidden`` status is
     excluded, and ordering is recommended first, experimental after (stable
     within a group). Returns None on any failure so fetch_models falls back
-    to the direct HTTP catalog.
+    to the static FALLBACK_MODELS list.
     """
     try:
         proc = subprocess.run(
@@ -981,14 +1038,14 @@ class CloudflareProfile(ProviderProfile):
         base_url: str | None = None,
         timeout: float = 8.0,
     ) -> list[str] | None:
-        """Live catalog: auth-cloudflare binary first, direct HTTP fallback.
+        """Live catalog: auth-cloudflare binary first, static fallback second.
 
         When the auth-cloudflare executable is present and compatible, the
         catalog comes from ``catalog get --format json`` (policy-ordered,
-        primary-agent-eligible ids only). The direct in-process fetch of
-        ``/ai/models/search`` stays as the verified default and the fallback
-        on any binary error; it is temporary and must be removed once the
-        executable bridge is stable (TODO below).
+        primary-agent-eligible ids only). Without a binary, or on any binary
+        catalog error, the static ``FALLBACK_MODELS`` list is returned - the
+        Rust binary owns live fetching, so there is no direct in-process HTTP
+        catalog discovery.
         """
         bin_path = locate_auth_cloudflare_binary()
         if bin_path is not None:
@@ -1000,7 +1057,7 @@ class CloudflareProfile(ProviderProfile):
                 from providers.base import logger
 
                 logger.debug(
-                    "fetch_models(%s): binary catalog failed; direct HTTP fallback",
+                    "fetch_models(%s): binary catalog failed; static fallback",
                     self.name,
                 )
             else:
@@ -1009,67 +1066,7 @@ class CloudflareProfile(ProviderProfile):
                 logger.debug(
                     "fetch_models(%s): binary incompatible - %s", self.name, detail
                 )
-        # TODO(auth-hermes-cloudflare#1): remove direct Python catalog fetching
-        # after the auth-cloudflare executable bridge is stable.
-        return self._fetch_models_direct(api_key=api_key, timeout=timeout)
-
-    def _fetch_models_direct(
-        self,
-        *,
-        api_key: str | None = None,
-        timeout: float = 8.0,
-    ) -> list[str] | None:
-        """Direct HTTP ``/ai/models/search`` (OpenRouter format) - TEMPORARY.
-
-        The base implementation probes ``{base_url}/models`` which does not
-        exist on Cloudflare; this override hits the real search endpoint,
-        filters to chat-capable ``@cf/`` models (hidden/safety excluded),
-        gates the result on PRIMARY_AGENT_MODELS first in policy order, and
-        appends any remaining chat-like models (advanced section). Returns
-        None on any failure so callers fall back to ``fallback_models``.
-        The Rust core owns the canonical catalog logic; this is a thin
-        in-process fallback that ``TODO(auth-hermes-cloudflare#1)`` removes
-        after the executable bridge is stable.
-        """
-        url = catalog_url()
-        if not url:
-            return None
-        token = api_key or api_token()
-        if not token:
-            return None
-        req = urllib.request.Request(url)
-        req.add_header("Authorization", f"Bearer {token}")
-        req.add_header("Accept", "application/json")
-        try:
-            from hermes_cli.urllib_security import open_credentialed_url
-            from providers.base import _profile_user_agent
-
-            req.add_header("User-Agent", _profile_user_agent())
-            with open_credentialed_url(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode())
-        except Exception as exc:  # network / auth / malformed payload
-            from providers.base import logger
-
-            logger.debug("fetch_models(%s): %s", self.name, exc)
-            return None
-        items = data if isinstance(data, list) else data.get("data", [])
-        ids = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
-        chat = [
-            mid
-            for mid in ids
-            if isinstance(mid, str)
-            and mid.startswith("@cf/")
-            and not any(frag in mid for frag in _NON_CHAT_FRAGMENTS)
-            and MODEL_POLICY.get(mid, {}).get("status") != "hidden"
-        ]
-        # PRIMARY_AGENT_MODELS gate first: allow-listed models lead in
-        # policy order (recommended < available < experimental), then the
-        # remaining chat-like models (advanced picker section).
-        primary = [mid for mid in chat if mid in PRIMARY_AGENT_MODELS]
-        advanced = [mid for mid in chat if mid not in PRIMARY_AGENT_MODELS]
-        primary.sort(key=lambda mid: _policy_sort_key(mid, chat.index(mid)))
-        ordered = primary + advanced
-        return ordered or None
+        return list(FALLBACK_MODELS)
 
 
 def validate_setup() -> dict:
@@ -1190,7 +1187,6 @@ cloudflare = CloudflareProfile(
         "workers-ai",
         "cf-workers-ai",
         "cf",
-        "cloudflare-ai",
     ),
     display_name="Auth Cloudflare Workers AI",
     description=(
