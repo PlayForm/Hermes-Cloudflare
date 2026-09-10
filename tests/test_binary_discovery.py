@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import os
 import socket
-import sys
 import tempfile
 import unittest
 from pathlib import Path

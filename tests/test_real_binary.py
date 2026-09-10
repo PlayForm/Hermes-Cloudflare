@@ -99,7 +99,7 @@ class RealBinaryTest(unittest.TestCase):
         self.assertGreaterEqual(protocol_version, 1)
 
     def test_real_binary_doctor_binary_source(self):
-        bin_path = self._locate_or_skip()
+        self._locate_or_skip()
         self._set_synthetic_creds()
         result = plugin.cloudflare_doctor()
         self.assertEqual(result.get("source"), "binary")
@@ -113,7 +113,7 @@ class RealBinaryTest(unittest.TestCase):
         self.assertNotIn(SYNTHETIC_ACCOUNT, rendered)
 
     def test_real_binary_missing_creds_exits_2_relayed(self):
-        bin_path = self._locate_or_skip()
+        self._locate_or_skip()
         self._set_synthetic_creds()
         # Only the token stays configured; every account env is cleared.
         os.environ.pop(plugin.AUTH_ACCOUNT_ENV, None)
