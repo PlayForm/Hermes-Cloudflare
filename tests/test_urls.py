@@ -9,8 +9,10 @@ Contract under test:
   (NOT OpenAI's ``/models``).
 - Without an account ID the catalog URL is None and the inference URL uses
   the ``<ACCOUNT_ID>`` placeholder.
-- ``fixed_base_url=True`` so the Hermes setup wizard never prompts for a
-  Base URL override.
+- ``CLOUDFLARE_BASE_URL`` (``BASE_URL_ENV``) is declared in the profile's
+  ``env_vars`` so stock Hermes maps it to ``ProviderConfig.base_url_env_var``
+  and the setup wizard pre-fills the Base URL prompt from it; the override
+  takes precedence over the account-derived URL.
 """
 
 from __future__ import annotations
@@ -82,10 +84,25 @@ class UrlTest(unittest.TestCase):
 		os.environ.pop(plugin.ACCOUNT_ENV, None)
 		self.assertEqual(plugin.cloudflare.models_url, "")
 
-	def test_fixed_base_url_flag_set(self):
-		# The base URL is derived from the account ID; the setup wizard must
-		# never prompt for a Base URL override (feedback 06).
-		self.assertTrue(plugin.cloudflare.fixed_base_url)
+	def test_base_url_env_var_declared_for_wizard(self):
+		# The base URL is derived from the account ID. BASE_URL_ENV is declared
+		# in env_vars with a `*_BASE_URL` suffix so stock Hermes
+		# (_register_plugin_provider) maps it to ProviderConfig.base_url_env_var
+		# and the setup wizard pre-fills its Base URL prompt from it - the user
+		# never types a base URL (feedback 06).
+		self.assertEqual(plugin.BASE_URL_ENV, "CLOUDFLARE_BASE_URL")
+		self.assertIn(plugin.BASE_URL_ENV, plugin.cloudflare.env_vars)
+		self.assertTrue(plugin.BASE_URL_ENV.endswith("_BASE_URL"))
+
+	def test_inference_base_url_honors_base_url_env_override(self):
+		os.environ[plugin.BASE_URL_ENV] = "https://custom.example/ai/v1"
+		self.addCleanup(os.environ.pop, plugin.BASE_URL_ENV, None)
+		self.assertEqual(plugin.inference_base_url(), "https://custom.example/ai/v1")
+
+	def test_inference_base_url_override_strips_trailing_slash(self):
+		os.environ[plugin.BASE_URL_ENV] = "https://custom.example/ai/v1/"
+		self.addCleanup(os.environ.pop, plugin.BASE_URL_ENV, None)
+		self.assertEqual(plugin.inference_base_url(), "https://custom.example/ai/v1")
 
 	def test_base_url_uses_client_v4_prefix(self):
 		self.assertTrue(plugin.inference_base_url().startswith(API_BASE))
