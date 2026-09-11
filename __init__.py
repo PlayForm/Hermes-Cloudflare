@@ -1334,6 +1334,14 @@ cloudflare = CloudflareProfile(
     # the user to type an override. URLs stay LAZY (see CloudflareProfile).
     supports_health_check=False,
 )
+# fixed_base_url is a stock core field since hermes-agent's
+# "derived base URL" feature (feat/fixed-base-url-provider-flag): when set,
+# the setup wizard skips the Base URL prompt entirely and reads the live
+# profile URL. Set it ONLY when the core knows the field - passing it as a
+# constructor kwarg on an older core breaks import. The env-var mechanism
+# (BASE_URL_ENV above) remains the fallback on cores without the field.
+if hasattr(ProviderProfile, "fixed_base_url"):
+    cloudflare.fixed_base_url = True
 
 register_provider(cloudflare)
 

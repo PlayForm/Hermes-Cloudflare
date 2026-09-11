@@ -32,6 +32,9 @@ class UrlTest(unittest.TestCase):
 	def setUp(self):
 		self._saved = dict(os.environ)
 		os.environ[plugin.AUTH_ACCOUNT_ENV] = ACCOUNT
+		# A persisted CLOUDFLARE_BASE_URL override (written by
+		# `hermes cloudflare setup`) must not leak into derived-URL tests.
+		os.environ.pop(plugin.BASE_URL_ENV, None)
 
 	def tearDown(self):
 		os.environ.clear()
