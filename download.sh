@@ -6,8 +6,9 @@
 # Installs the auth-cloudflare EXECUTABLE (never a dylib) from GitHub Releases.
 #
 # Security properties:
-#   - downloads ONLY the pinned release asset + SHA256SUMS (never curl | bash)
-#   - verifies the archive sha256 against SHA256SUMS BEFORE extraction
+#   - downloads ONLY the pinned release asset + its per-target
+#     SHA256SUMS-<target>.txt (never curl | bash)
+#   - verifies the archive sha256 against SHA256SUMS-<target>.txt BEFORE extraction
 #   - extracts into a mktemp directory (never directly into BINARY_DIR)
 #   - self-validates the binary: '<exe> version --format json' must report
 #     '"name":"auth-cloudflare"' and '"protocol_version" >= 1'
@@ -141,13 +142,13 @@ fi
 ASSET="auth-cloudflare-${TARGET}.tar.gz"
 BASE_URL="https://github.com/${REPO}/releases/download/Cloudflare/v${BIN_VERSION}"
 ASSET_URL="${BASE_URL}/${ASSET}"
-SUMS_URL="${BASE_URL}/SHA256SUMS"
+SUMS_URL="${BASE_URL}/SHA256SUMS-${TARGET}.txt"
 
 # --- download (never curl | bash) ----------------------------------------
 echo "Downloading ${ASSET} (v${BIN_VERSION})"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auth-cloudflare-install.XXXXXX")"
 TMP_ARCHIVE="${WORK_DIR}/${ASSET}"
-TMP_SUMS="${WORK_DIR}/SHA256SUMS"
+TMP_SUMS="${WORK_DIR}/SHA256SUMS-${TARGET}.txt"
 
 curl -fL --retry 3 --connect-timeout 10 --max-time 300 -o "$TMP_ARCHIVE" "$ASSET_URL" || {
 	echo "ERROR: download failed - ${ASSET_URL}" >&2
@@ -155,8 +156,8 @@ curl -fL --retry 3 --connect-timeout 10 --max-time 300 -o "$TMP_ARCHIVE" "$ASSET
 	exit 1
 }
 curl -fL --retry 3 --connect-timeout 10 --max-time 60 -o "$TMP_SUMS" "$SUMS_URL" || {
-	echo "ERROR: SHA256SUMS download failed - ${SUMS_URL}" >&2
-	echo "  the release exists but is missing its checksum file - do not install unverified artifacts" >&2
+	echo "ERROR: SHA256SUMS-${TARGET}.txt download failed - ${SUMS_URL}" >&2
+	echo "  the release exists but is missing its per-target checksum file - do not install unverified artifacts" >&2
 	exit 1
 }
 
@@ -170,7 +171,7 @@ sha256_of() {
 }
 expected="$(awk -v a="$ASSET" '$2 == a { print $1; exit }' "$TMP_SUMS" | tr '[:upper:]' '[:lower:]')"
 if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
-	echo "ERROR: SHA256SUMS has no valid checksum entry for ${ASSET}" >&2
+	echo "ERROR: SHA256SUMS-${TARGET}.txt has no valid checksum entry for ${ASSET}" >&2
 	echo "  refusing to install an unverified archive" >&2
 	echo "  re-check the release: https://github.com/${REPO}/releases/tag/Cloudflare/v${BIN_VERSION}" >&2
 	exit 1

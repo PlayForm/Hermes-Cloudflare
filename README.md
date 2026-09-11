@@ -175,7 +175,8 @@ bash download.sh [version] [target-triple]
   that tag.
 - Installs `auth-cloudflare` into `~/.hermes/bin/auth-cloudflare` by default
   (override with `BINARY_DIR` or `AUTH_CLOUDFLARE_BIN`).
-- SHA256SUMS-verified: the archive checksum must match `SHA256SUMS` before
+- SHA256SUMS-verified: the archive checksum must match the per-target
+  `SHA256SUMS-<target>.txt` before
   extraction, and the extracted binary self-validates via
   `auth-cloudflare version --format json`.
 - Atomic + fail-closed: installs via copy-then-rename through a temp file,
